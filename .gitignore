@@ -1,0 +1,25 @@
+# ---- Rust 构建产物 ----
+/target
+**/*.rs.bk
+
+# ---- 产品运行期产物：诊断报告属于用户数据，不入库 ----
+/diagnostics/
+*.diagnostic.json
+.dustlens/
+
+# ---- 内部协作产物：含基础设施信息，禁止入库（Atlas 规范 §6.3）----
+/AGENT-REPORT*.md
+/REPORT-TO-PARENT*.md
+/reports/
+/.atlas/
+
+# ---- 含真实清理台账的素材文档：不入库 ----
+# 用户 2026-10-17 裁定（方案 B）：这两份含真实路径/体积/应用名等个人环境信息，
+# 不随公开仓库发布。保留在本地作为设计依据。
+#
+#   DustLens-研究简报.md   —— 真实清理台账（含本机绝对路径）
+#   DustLens-简报评估.md   —— 对简报的评估（沿用同一批真实数据）
+#
+# 入库的是：DustLens-设计共识.md（权威）· DustLens-思路提炼.md（方法论）
+/DustLens-研究简报.md
+/DustLens-简报评估.md
