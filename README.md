@@ -1,7 +1,8 @@
 # DustLens
 
-![Rust](https://img.shields.io/badge/Rust-1.75%2B-blue?style=for-the-badge&logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.85%2B-blue?style=for-the-badge&logo=rust)
 ![status](https://img.shields.io/badge/status-M2%20archive%20ready-blue?style=for-the-badge)
+![license](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
 ![DeepSeek Assisted Development](https://img.shields.io/badge/DeepSeek%20Assisted-Development-brightgreen?style=for-the-badge&logo=deepseek)
 
 > 目录整洁度诊断器 —— 只声明形式属性、附上引用证据，把「需不需要」的判断权完整交给用户。
@@ -225,7 +226,7 @@ DustLens/
 
 | 项 | 值 |
 |---|---|
-| 语言 | Rust 1.75+（实测 1.97.1） |
+| 语言 | Rust 1.85+（MSRV，`cargo +1.85.0 check` 实测通过） |
 | 依赖 | `serde` / `serde_json` / `walkdir` / `clap` |
 | 平台 | 先 Linux；之后可能 Windows；**macOS 明确不做** |
 | 界面 | 暂缓。**先验证 core**；倾向 core 与 UI 解耦 |
