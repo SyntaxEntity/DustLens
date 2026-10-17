@@ -165,41 +165,26 @@ fn in_project_context(path: &Path) -> bool {
         }
         cur = p.parent();
     }
-    false
-}
-
-/// 目录名是否像某个应用的私有数据（用于识别「位置异常」的应用目录）。
-fn looks_like_app_dir_name(name: &str) -> bool {
-    if name.starts_with('.') {
-        return false;
+    // 或同级的父目录里存在构建描述文件 —— 那就说明「这是某个项目的一部分」，
+    // 它不是「位置异常」，只是「没被 git 管理的项目」。
+    if let Some(parent) = path.parent() {
+        const MANIFESTS: &[&str] = &[
+            "Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+            "setup.py",
+            "CMakeLists.txt",
+            "meson.build",
+            "Makefile",
+            "go.mod",
+            "pom.xml",
+            "build.gradle",
+        ];
+        if MANIFESTS.iter().any(|m| parent.join(m).exists()) {
+            return true;
+        }
     }
-    let lower = name.to_lowercase();
-    const APPISH: &[&str] = &[
-        "cache",
-        "data",
-        "config",
-        "app",
-        "launcher",
-        "games",
-        "game",
-        "minecraft",
-        "steam",
-        "logs",
-        "log",
-        "temp",
-        "tmp",
-        "backup",
-        "backups",
-        "download",
-        "downloads",
-        "saves",
-        "models",
-        "mods",
-        "runtime",
-        "lib",
-        "bin",
-    ];
-    APPISH.iter().any(|a| lower.contains(a))
+    false
 }
 
 /// 检测结果（含未成为 `Finding` 的聚合信息）。
@@ -382,11 +367,30 @@ fn detect_odd_locations(
     procs: &ProcessIndex,
     refs: &ReferenceIndex,
     cfg: &ScanConfig,
-    th: Thresholds,
+    _th: Thresholds,
 ) -> Vec<Finding> {
     let home = cfg.home.as_deref();
     let mut out = Vec::new();
     let mut stats = DetectionStats::default();
+
+    // 「位置异常」的判据必须**窄**。早期版本把任何非项目语境的
+    // `__pycache__` / `node_modules` 都算进来，结果在真实机器上报出 1344 条 ——
+    // 其中绝大多数是 `site-packages/__pycache__`、嵌套 `node_modules`
+    // 这类**完全正常**的产物。噪音会淹没真正的问题。
+    //
+    // 现在的定义收窄为「**随手留下的产物**」：产物目录直接位于
+    //   · 扫描根之下，或
+    //   · 下载 / 桌面 / 模板 这三个「用户随手放东西」的目录之下。
+    // 更深的位置说明用户是**有意组织**的，不构成异常。
+    const CARELESS_PARENTS: &[&str] = &[
+        "Downloads", "Desktop", "Templates", "下载", "桌面", "模板",
+    ];
+
+    let roots: Vec<PathBuf> = scan
+        .roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .collect();
 
     for d in &scan.dirs {
         let Some(name) = d.path.file_name().and_then(|n| n.to_str()) else {
@@ -403,6 +407,19 @@ fn detect_odd_locations(
         if d.bytes == 0 {
             continue;
         }
+        // 必须在「随手区域」：产物目录的**父目录**就是扫描根或随手目录
+        let Some(parent) = d.path.parent() else {
+            continue;
+        };
+        let parent_is_root = roots.iter().any(|r| r == parent);
+        let parent_is_careless = parent
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| CARELESS_PARENTS.contains(&n))
+            .unwrap_or(false);
+        if !parent_is_root && !parent_is_careless {
+            continue;
+        }
         if let Some(f) = make_finding(
             &d.path,
             FindingKind::OddLocation,
@@ -417,36 +434,15 @@ fn detect_odd_locations(
         }
     }
 
-    // 另一种位置异常：家目录根下明显是「应用私有目录」的非隐藏目录
-    // （隐藏目录属 XDG 遗留，归入规范违规而不是位置异常）
-    if let Some(home) = home {
-        for d in &scan.dirs {
-            if d.path.parent() != Some(home) {
-                continue;
-            }
-            let Some(name) = d.path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if name.starts_with('.') || !looks_like_app_dir_name(name) {
-                continue;
-            }
-            if d.bytes < th.unclear_bytes {
-                continue;
-            }
-            if let Some(f) = make_finding(
-                &d.path,
-                FindingKind::OddLocation,
-                d.bytes,
-                d.files,
-                procs,
-                refs,
-                Some(home),
-                &mut stats,
-            ) {
-                out.push(f);
-            }
-        }
-    }
+    // 说明：这里**刻意不做**「按目录名猜这是不是应用目录」的判据。
+    //
+    // 早期版本用一张词表（含 games / downloads / data / cache …）去猜，
+    // 结果把 `$HOME/Games`（94.9 GiB）与 `$HOME/Downloads` 报成了「位置异常」。
+    // 那是把**用户的资产**说成「异常」，违背 P1（工具不评判价值）。
+    //
+    // 「位置异常」现在只保留一条**客观、可验证**的判据：
+    // **没有项目语境的构建产物目录**。用户自己的大目录由「体积异常」如实呈现，
+    // 名字里有什么词不构成任何判断依据。
 
     // 去重（同一路径可能两种规则都命中）
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -713,8 +709,9 @@ mod tests {
 
     #[test]
     fn artifact_without_project_context_is_odd() {
+        // 「位置异常」= 随手区域（下载/桌面/模板）下的构建产物
         let home = tmpdir("noproj");
-        let t = home.join("docs/node_modules");
+        let t = home.join("Downloads/node_modules");
         fs::create_dir_all(&t).unwrap();
         fs::write(t.join("f"), [0u8; 16]).unwrap();
 
@@ -725,7 +722,61 @@ mod tests {
             det.odd_location
                 .iter()
                 .any(|f| f.path.file_name().unwrap() == "node_modules"),
-            "非项目目录下的 node_modules 应被判为位置异常"
+            "随手区域（Downloads）下的 node_modules 应被判为位置异常"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn deep_artifacts_are_not_odd_locations() {
+        // 回归：真实机器上曾报出 1344 条「位置异常」，绝大多数是
+        // `site-packages/__pycache__`、嵌套 `node_modules` 这类正常产物。
+        let home = tmpdir("deep");
+        let p = home.join(".local/share/app/lib/python3/site-packages/__pycache__");
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("x.pyc"), vec![0u8; 64]).unwrap();
+        let n = home.join("Downloads/proj/node_modules/pkg/node_modules");
+        fs::create_dir_all(&n).unwrap();
+        fs::write(n.join("i.js"), vec![0u8; 64]).unwrap();
+
+        let cfg = config_for(&home);
+        let scan = crate::scan::scan(&cfg);
+        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        assert!(
+            det.odd_location.is_empty(),
+            "深层产物不应被判为位置异常，实际: {:?}",
+            det.odd_location.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn user_content_dirs_are_never_odd_locations() {
+        // 回归：早期用词表猜「应用目录」，把 $HOME/Games 与 $HOME/Downloads
+        // 报成了「位置异常」—— 那是把用户的资产说成异常（违背 P1）。
+        let home = tmpdir("assets");
+        for name in ["Games", "Downloads", "Pictures", "Documents", "Videos"] {
+            let p = home.join(name);
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("f.bin"), vec![0u8; 64]).unwrap();
+        }
+        let cfg = config_for(&home);
+        let scan = crate::scan::scan(&cfg);
+        let th = Thresholds {
+            unclear_bytes: 16, // 让体积门槛不挡住
+            ..Thresholds::default()
+        };
+        let det = detect_with(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+            th,
+        );
+        let offenders: Vec<&PathBuf> = det.odd_location.iter().map(|f| &f.path).collect();
+        assert!(
+            offenders.is_empty(),
+            "用户自己的大目录不得被判为位置异常，实际: {offenders:?}"
         );
         let _ = fs::remove_dir_all(&home);
     }
@@ -885,7 +936,7 @@ mod tests {
     #[test]
     fn odd_and_unclear_are_mutually_exclusive_on_same_path() {
         let home = tmpdir("excl");
-        let nm = home.join("stuff/node_modules");
+        let nm = home.join("Downloads/node_modules");
         fs::create_dir_all(&nm).unwrap();
 
         let cfg = config_for(&home);

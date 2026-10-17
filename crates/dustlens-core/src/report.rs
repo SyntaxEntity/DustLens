@@ -346,25 +346,44 @@ pub fn render_markdown(
     if report.scan_gaps.is_empty() {
         s.push_str("_本次扫描没有遇到读取失败的位置。_\n\n");
     } else {
+        // 按原因聚合：4 万条「符号链接未跟随」逐条列出没有阅读价值，
+        // 反而会把真正的「权限不足」淹没。
+        let mut by_kind: std::collections::BTreeMap<&str, Vec<&ScanGapOut>> =
+            std::collections::BTreeMap::new();
+        for g in &report.scan_gaps {
+            by_kind.entry(g.kind_label).or_default().push(g);
+        }
+
         s.push_str(&format!(
             "> **诚实披露**：以下 {} 处**未被读到**，它们的体积未计入统计。\n\
              > 未出现在本节的位置，代表已被读到。\n\n",
             report.scan_gaps.len()
         ));
-        s.push_str("| 位置 | 原因 | 详情 |\n|---|---|---|\n");
-        for g in report.scan_gaps.iter().take(200) {
-            s.push_str(&format!(
-                "| `{}` | {} | {} |\n",
-                g.path, g.kind_label, g.detail
-            ));
-        }
-        if report.scan_gaps.len() > 200 {
-            s.push_str(&format!(
-                "\n_另有 {} 处未列出（完整清单见 JSON）。_\n",
-                report.scan_gaps.len() - 200
-            ));
+        s.push_str("| 原因 | 处数 | 是否影响结论 |\n|---|---:|---|\n");
+        for (kind, items) in &by_kind {
+            let impact = match *kind {
+                "符号链接未跟随" => "低（默认不跟随，需显式 `--follow-symlinks`）",
+                "权限不足" => "**高**（这部分完全没读到）",
+                "到达深度上限" => "**高**（显式限制了深度）",
+                "跨文件系统未进入" => "中（可用 `--cross-filesystem`）",
+                _ => "中",
+            };
+            s.push_str(&format!("| {} | {} | {} |\n", kind, items.len(), impact));
         }
         s.push('\n');
+
+        // 只详列「真正影响结论」的类别；符号链接/深度上限各举例少量
+        for (kind, items) in &by_kind {
+            let cap = if *kind == "符号链接未跟随" { 5 } else { 100 };
+            s.push_str(&format!("### {}（{} 处，示例 {} 条）\n\n", kind, items.len(), cap.min(items.len())));
+            for g in items.iter().take(cap) {
+                s.push_str(&format!("- `{}` — {}\n", g.path, g.detail));
+            }
+            if items.len() > cap {
+                s.push_str(&format!("- …另有 {} 处（完整清单见 JSON）\n", items.len() - cap));
+            }
+            s.push('\n');
+        }
     }
 
     // ---- 排除项 ----

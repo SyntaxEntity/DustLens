@@ -9,6 +9,8 @@
 //!
 //! 入口见 [`run`]。
 
+pub mod archive;
+pub mod presets;
 pub mod detect;
 pub mod refs;
 pub mod report;

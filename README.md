@@ -1,12 +1,12 @@
 # DustLens
 
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-blue?style=for-the-badge&logo=rust)
-![status](https://img.shields.io/badge/status-M1%20core%20ready-blue?style=for-the-badge)
+![status](https://img.shields.io/badge/status-M2%20archive%20ready-blue?style=for-the-badge)
 ![DeepSeek Assisted Development](https://img.shields.io/badge/DeepSeek%20Assisted-Development-brightgreen?style=for-the-badge&logo=deepseek)
 
 > 目录整洁度诊断器 —— 只声明形式属性、附上引用证据，把「需不需要」的判断权完整交给用户。
 
-> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**核心 M1 可用**（只读诊断 CLI）｜ 已知限制见 [已知限制](#已知限制)
+> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M2 可用**（诊断 + 版本化归档）｜ 已知限制见 [已知限制](#已知限制)
 
 ---
 
@@ -68,6 +68,43 @@
 **它就是靠 LLM 做鉴定的工具。** 担心隐私，你有三个选择：
 把敏感目录放进排除清单、干脆不配 LLM、或者**自己部署**一个本地模型端点。
 
+### 版本化归档（M2）
+
+诊断之外，DustLens 可以把条目**移出视野**而不销毁：
+
+```bash
+dustlens archive create ~/scratch/old build-tmp      # 移入版本化归档
+dustlens archive list                                # 列出全部版本
+dustlens archive show <版本>                          # 看某版本明细
+dustlens archive restore <版本>                       # 整批恢复
+dustlens archive discard <版本>                       # 永久销毁（真正释放空间）
+```
+
+**两条硬约束**（不是 UI 约定，是 API 形状）：
+
+- **只能按版本整批恢复** —— 本工具**没有**「恢复某个条目」的能力。想单独取回某个文件，
+  请自己在文件管理器里从归档目录拿。
+- **恢复绝不覆盖** —— 只要有一个目标位置已存在内容，**整批恢复被拒绝**，不会动任何文件。
+
+归档格式是可读目录（`~/.local/share/dustlens/archive/<版本>/payload/`），
+你可以直接用 `ls` 查看，不需要任何专门工具解包。
+
+> **注意**：归档是**移动**，不是删除。同盘移动不占额外空间，但**也不释放空间** ——
+> 真正的空间释放发生在 `archive discard`。
+
+### 重灾区预设
+
+默认只扫家目录。**家目录之外最容易堆垃圾的地方**整理成了可选预设：
+
+```bash
+dustlens presets                                  # 查看清单
+dustlens scan --presets all                       # 全部预设 + 家目录
+dustlens scan ~/x --presets tmp,vartmp            # 指定预设 + 指定目录
+```
+
+预设**不默认启用**（扫描范围必须由你确认）。清单：
+`/tmp` · `/var/tmp` · `/opt` · `/srv` · `/var/cache` · `/var/log` · `/var/lib/flatpak`。
+
 ### 能力分层
 
 | 层 | 能力 | 需要 LLM |
@@ -118,7 +155,16 @@ dustlens ~/Projects --stdout-only
 dustlens ~/Projects --quiet
 
 # 脚本场景跳过交互确认（自行承担责任：扫什么由你指定）
-dustlens ~/Projects --yes
+dustlens scan ~/Projects --yes
+
+# 纳入「重灾区」预设
+dustlens scan --presets all
+
+# 归档（可恢复，不是删除）
+dustlens archive create ~/old-stuff --note "旧项目"
+dustlens archive list
+dustlens archive restore <版本>
+dustlens archive discard <版本>
 ```
 
 **常用选项**：
@@ -159,6 +205,8 @@ DustLens/
 │   │       ├── scan.rs            # BFS 并行扫描 + 盲区记录
 │   │       ├── refs.rs            # 引用证据（/proc + 配置）
 │   │       ├── detect.rs          # 四类检测器
+│   │       ├── archive.rs         # 版本化归档（整批恢复，禁止单条）
+│   │       ├── presets.rs         # 重灾区预设
 │   │       └── report.rs          # JSON + Markdown 渲染
 │   └── dustlens-cli/              # 命令行（clap）
 ├── README.md                      # 本文件：面向用户
@@ -188,12 +236,15 @@ DustLens/
 
 - **只在 Fedora + btrfs + GNOME + Wayland 上跑过**；其它发行版/桌面环境/文件系统**未验证**。
 - **平台**：只实现 Linux（`/proc` 依赖在此）。Windows **未构建、未运行**；macOS **明确不做**。
-- **只读**：本版本**只能诊断**，没有删除、移动、归档、恢复能力 —— 那些在后续里程碑。
+- **没有「永久删除」命令**：DustLens 只提供「归档」与「销毁归档」两步。删除永远先经过归档区。
 - **无 GUI、无 LLM**：全部交互在命令行；「这是什么」的自然语言说明尚未实现。
 - **不含权限审计**：`/etc/hosts` 权限异常那类问题本版本不检查。
 - **「正在使用」是瞬时快照**：编译/索引等短命进程会让目录暂时显示为占用，几分钟后就变回「无人认领」。
   报告里会注明这一点。
 - **规范违规只覆盖家目录根下的隐藏目录**；非隐藏目录（用户自己的文件夹）刻意不判为应用的错。
+- **「位置异常」判据很窄**：只认**随手区域**（`Downloads` / `Desktop` / `Templates`）与扫描根之下的构建产物。
+  更深的位置视为用户有意组织，不做判定。
+- **归档不保留**：硬链接会退化成独立副本；扩展属性 / ACL / 所有权（uid/gid）不保留。
 - **扫描盲区会计入报告但不会自动重试**：`--max-depth`、跨文件系统、未跟随的符号链接、权限不足
   都会如实列出，且**这些位置的体积未计入统计**。
 - **`will_use`（配置指向它）是文本匹配**：配置文件里出现的路径字符串即算命中，
@@ -209,8 +260,8 @@ DustLens/
 |---|---|---|
 | M0 | 设计冻结：定位、八条不定项、引用证据三级、隐私模型 | ✅ 完成 |
 | **M1** | **core**：BFS 扫描 + 目录级体积聚合 + 引用证据三级 + 四类检测 + 盲区披露 + JSON/Markdown | ✅ **完成**（v0.1.0） |
-| M2 | 归档与恢复（按版本，禁止单条恢复；恢复遇冲突整批拒绝） | ⏳ 未开始 |
-| M3 | 规范违规的可配置白名单 / 用户目录增删 | ⏳ 未开始 |
+| **M2** | **归档与恢复**：按版本整批恢复、冲突整批拒绝、`discard` 真正释放空间 | ✅ **完成** |
+| M3 | 规范违规的可配置白名单 / 排除清单可由 CLI 增删 | ⏳ 未开始 |
 | M4 | LLM 鉴定层（用户自配端点，默认关闭） | ⏳ 未开始 |
 | M5 | GUI | ⏳ 暂缓，待 M1–M4 有真实使用数据 |
 
