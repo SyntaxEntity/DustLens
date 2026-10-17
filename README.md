@@ -1,12 +1,12 @@
 # DustLens
 
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-blue?style=for-the-badge&logo=rust)
-![status](https://img.shields.io/badge/status-design%20frozen-yellow?style=for-the-badge)
+![status](https://img.shields.io/badge/status-M1%20core%20ready-blue?style=for-the-badge)
 ![DeepSeek Assisted Development](https://img.shields.io/badge/DeepSeek%20Assisted-Development-brightgreen?style=for-the-badge&logo=deepseek)
 
 > 目录整洁度诊断器 —— 只声明形式属性、附上引用证据，把「需不需要」的判断权完整交给用户。
 
-> 版本 `未发版`（尚无构建描述）｜ 状态：**设计冻结，核心未开工** ｜ 已知限制见 [已知限制](#已知限制)
+> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**核心 M1 可用**（只读诊断 CLI）｜ 已知限制见 [已知限制](#已知限制)
 
 ---
 
@@ -83,19 +83,67 @@
 
 ## 安装
 
-**目前没有任何可安装的东西** —— 本仓库尚不含代码，也未有发布产物。
+**尚无发布产物**（无二进制包、无包管理器分发）。当前唯一方式是[从源码构建](#构建开发)。
 
-规划中的分发方式：源码构建（见 [构建（开发）](#构建开发)），暂无包管理器分发计划。
+```bash
+git clone git@github.com:SyntaxEntity/DustLens.git
+cd DustLens
+cargo build --release --offline
+# 产物：target/release/dustlens
+```
+
+> `--offline` 仅在依赖已缓存于本地时可用；正常情况下去掉它即可。
 
 ---
 
+## 使用
+
+```bash
+# 环境自检
+dustlens doctor
+
+# 查看默认隐私排除清单
+dustlens excludes
+
+# 扫描家目录（默认值；会先投影范围并要求确认）
+dustlens
+
+# 扫描指定目录，把报告写到 diagnostics/
+dustlens ~/Projects -o diagnostics
+
+# 只打印 Markdown 到 stdout
+dustlens ~/Projects --stdout-only
+
+# 只看摘要
+dustlens ~/Projects --quiet
+
+# 脚本场景跳过交互确认（自行承担责任：扫什么由你指定）
+dustlens ~/Projects --yes
+```
+
+**常用选项**：
+
+| 选项 | 作用 |
+|---|---|
+| `--max-depth N` | 限制深度（默认**不限**；限制会在报告里留下「盲区」记录） |
+| `--follow-symlinks` | 跟随符号链接（默认不跟随） |
+| `--cross-filesystem` | 允许跨文件系统（默认停留同一文件系统） |
+| `--threads N` | 并行线程数（0 = 自动） |
+| `-o DIR` | 报告输出目录（默认 `diagnostics/`，已 gitignore） |
+
+产物：`diagnostics/dustlens-<unix>.md` + `.json`（JSON 为主数据，Markdown 为视图）。
+
+**本程序只读** —— 不删除、不移动、不修改被扫描目录中的任何文件。
+
 ## 构建（开发）
 
-**当前无法构建** —— 仓库内没有 `Cargo.toml`，也没有任何 Rust 源码，因此**没有可执行的构建命令**。
+```bash
+cargo build --release    # 构建 CLI
+cargo test               # 单元测试（54 项）
+cargo build --offline    # 依赖已缓存时可用
+```
 
-规划中的技术栈为 Rust（core 优先），GUI 暂缓、且倾向与 core 解耦
-（core 将做成独立 crate + CLI，避免以后换 UI 需要重写）。
-待 `Cargo.toml` 落地后，本节会补上可直接复制执行的构建与测试命令。
+依赖来自 crates.io（`serde` / `serde_json` / `walkdir` / `clap`）。
 
 ---
 
@@ -103,14 +151,24 @@
 
 ```
 DustLens/
-├── README.md                  # 本文件：面向用户
-├── AGENTS.md                  # 面向 AI 协作者：红线、不定项、文档地图
-├── DustLens-设计共识.md        # 全部设计决策 + 理由 + 变更记录（唯一权威）
-├── DustLens-思路提炼.md        # 方法论抽象层：六个推理模式、七个可复用信号
-└── .gitignore
+├── Cargo.toml                     # workspace
+├── crates/
+│   ├── dustlens-core/             # 核心库（无 GUI、不联网）
+│   │   └── src/
+│   │       ├── types.rs           # 数据模型（引用强度三级、Finding、ScanGap）
+│   │       ├── scan.rs            # BFS 并行扫描 + 盲区记录
+│   │       ├── refs.rs            # 引用证据（/proc + 配置）
+│   │       ├── detect.rs          # 四类检测器
+│   │       └── report.rs          # JSON + Markdown 渲染
+│   └── dustlens-cli/              # 命令行（clap）
+├── README.md                      # 本文件：面向用户
+├── AGENTS.md                      # 面向 AI 协作者
+├── DustLens-设计共识.md            # 设计决策（唯一权威）
+├── DustLens-思路提炼.md            # 方法论抽象层
+└── diagnostics/                   # 报告输出（gitignore）
 ```
 
-> 代码目录尚未建立。另有两份第一手素材文档（真实清理台账）**保留在本地、不随本仓库发布**。
+> 另有两份第一手素材文档（真实清理台账）**保留在本地、不随本仓库发布**。
 
 ---
 
@@ -118,7 +176,8 @@ DustLens/
 
 | 项 | 值 |
 |---|---|
-| 语言 | Rust（规划，**尚未引入任何代码**） |
+| 语言 | Rust 1.75+（实测 1.97.1） |
+| 依赖 | `serde` / `serde_json` / `walkdir` / `clap` |
 | 平台 | 先 Linux；之后可能 Windows；**macOS 明确不做** |
 | 界面 | 暂缓。**先验证 core**；倾向 core 与 UI 解耦 |
 | LLM | 用户自配 API 端点（工具不做中转） |
@@ -127,12 +186,19 @@ DustLens/
 
 ## 已知限制
 
-- **功能缺口**：**核心未实现** —— 目录扫描、体积排序、引用证据、规范审计、LLM 鉴定，全部未开始（见 [路线图](#路线图)）。
-- **没有可安装的版本**：本仓库目前只有设计文档，没有任何可下载、可运行的产物。
-- **无版本号**：尚未发版，因此本 README 不填版本号，以免与将来的构建描述脱节。
-- **平台**：设计目标为先 Linux，**没有任何平台被验证过**（无代码）。Windows 未构建、未运行；macOS 明确不做。
-- **隐私机制仅为设计规格**：README「隐私边界」中承诺的排除清单、`$HOME` 外显式同意等，**尚无可执行代码**执行它们。
-- **许可证未定**：仓库内**没有 `LICENSE` 文件**，GitHub 会将其识别为无许可证（见 [许可证](#许可证)）。
+- **只在 Fedora + btrfs + GNOME + Wayland 上跑过**；其它发行版/桌面环境/文件系统**未验证**。
+- **平台**：只实现 Linux（`/proc` 依赖在此）。Windows **未构建、未运行**；macOS **明确不做**。
+- **只读**：本版本**只能诊断**，没有删除、移动、归档、恢复能力 —— 那些在后续里程碑。
+- **无 GUI、无 LLM**：全部交互在命令行；「这是什么」的自然语言说明尚未实现。
+- **不含权限审计**：`/etc/hosts` 权限异常那类问题本版本不检查。
+- **「正在使用」是瞬时快照**：编译/索引等短命进程会让目录暂时显示为占用，几分钟后就变回「无人认领」。
+  报告里会注明这一点。
+- **规范违规只覆盖家目录根下的隐藏目录**；非隐藏目录（用户自己的文件夹）刻意不判为应用的错。
+- **扫描盲区会计入报告但不会自动重试**：`--max-depth`、跨文件系统、未跟随的符号链接、权限不足
+  都会如实列出，且**这些位置的体积未计入统计**。
+- **`will_use`（配置指向它）是文本匹配**：配置文件里出现的路径字符串即算命中，
+  注释或示例里的提及也会算进去（偏保守，宁可多报「有人指向它」）。
+- **许可证未定**：仓库内**没有 `LICENSE` 文件**（见 [许可证](#许可证)）。
 - **徽章依赖外部服务**：徽章图片来自 shields.io，离线环境不显示。
 
 ---
@@ -142,15 +208,13 @@ DustLens/
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | 设计冻结：定位、八条不定项、引用证据三级、隐私模型 | ✅ 完成 |
-| M1 | **core**：目录级体积排序 + 引用证据 + 规范审计，输出 JSON + Markdown 诊断报告（不含 GUI、不含 LLM） | ⏳ 下一步 |
-| M2 | 隐私闸：默认排除清单、`$HOME` 外显式同意 | ⏳ 未开始 |
-| M3 | 归档与全量恢复（按版本，禁止单条恢复） | ⏳ 未开始 |
-| M4 | LLM 鉴定层（用户自配端点） | ⏳ 未开始 |
-| M5 | GUI | ⏳ 暂缓，待 core 验证后决策 |
+| **M1** | **core**：BFS 扫描 + 目录级体积聚合 + 引用证据三级 + 四类检测 + 盲区披露 + JSON/Markdown | ✅ **完成**（v0.1.0） |
+| M2 | 归档与恢复（按版本，禁止单条恢复；恢复遇冲突整批拒绝） | ⏳ 未开始 |
+| M3 | 规范违规的可配置白名单 / 用户目录增删 | ⏳ 未开始 |
+| M4 | LLM 鉴定层（用户自配端点，默认关闭） | ⏳ 未开始 |
+| M5 | GUI | ⏳ 暂缓，待 M1–M4 有真实使用数据 |
 
 **明确不做**：`macOS` · 系统监控仪表盘 · 启动项管理 · 一键清理 · 多许可证布局
-
----
 
 ## 项目文档
 

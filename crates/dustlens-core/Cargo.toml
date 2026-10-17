@@ -1,0 +1,13 @@
+[package]
+name = "dustlens-core"
+description = "DustLens 核心：扫描、引用证据、诊断报告（不含 GUI、不含 LLM）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }

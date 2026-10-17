@@ -1,0 +1,16 @@
+[package]
+name = "dustlens"
+description = "DustLens 命令行：目录整洁度诊断器（只读扫描，不做任何删除）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "dustlens"
+path = "src/main.rs"
+
+[dependencies]
+dustlens-core = { path = "../dustlens-core" }
+clap = { workspace = true }

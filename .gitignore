@@ -2,6 +2,9 @@
 /target
 **/*.rs.bk
 
+# 注意：Cargo.lock **应当入库**（本项目产出可执行程序，不是库）。
+# 不要把它加进这里。
+
 # ---- 产品运行期产物：诊断报告属于用户数据，不入库 ----
 /diagnostics/
 *.diagnostic.json
