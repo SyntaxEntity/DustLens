@@ -65,6 +65,8 @@ pub struct Summary {
     pub provenance_resolved: u64,
     /// 归属判定为「不属于任何包」的条目数
     pub provenance_untracked: u64,
+    /// 被内容鉴定出「这是什么」的条目数
+    pub identified: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +198,7 @@ pub fn build(
                 .collect(),
             provenance_resolved: det.provenance.resolved,
             provenance_untracked: det.provenance.untracked,
+            identified: det.identified as u64,
         },
         large: det.large.clone(),
         non_compliant: det.non_compliant.iter().map(|v| to_out(v, home)).collect(),
@@ -355,6 +358,10 @@ pub fn render_markdown(
     s.push_str(&format!(
         "- 冗余副本：**{}** 组，每组留一份可回收 **{}**\n",
         report.summary.duplicate_sets, report.summary.duplicate_reclaimable_human
+    ));
+    s.push_str(&format!(
+        "- 内容鉴定：**{}** 项能确定性说出「这是什么」（不依赖 LLM）\n",
+        report.summary.identified
     ));
     s.push_str(&format!(
         "- 扫描盲区：**{}** 处（见[扫描盲区](#扫描盲区)）\n",
@@ -550,7 +557,8 @@ pub fn render_markdown(
     } else {
         s.push_str(
             "> 这些条目**不是「一种脏」**，而是**判定失败**：工具无法确认它是什么。\n\
-             > 默认不进任何自动流程。你可以逐条查看内容，或交由 LLM 分析（会消耗较多 token）。\n\n",
+             > 默认不进任何自动流程。你可以逐条查看内容，或交由 LLM 分析（会消耗较多 token）。\n\
+             > 注：能被**结构/魔数**确定性识别的条目已经移出本节（见各项的「这是什么」依据）。\n\n",
         );
         for f in &report.unclear {
             render_finding(&mut s, f, 3, home);

@@ -115,6 +115,15 @@ pub enum Evidence {
         /// 判定依据（缺失的是文件/目录、父目录是否存在等）
         note: String,
     },
+    /// 「这是什么」（M5 内容鉴定，不依赖 LLM）
+    ///
+    /// `basis` 只描述**结构**（文件名、魔数、目录特征），**绝不包含文件内容**。
+    Identification {
+        what: String,
+        basis: String,
+        /// 是否足够确定；`false` 时不得用于剔除「说不清」
+        confident: bool,
+    },
     /// 体积与文件数统计（不是引用，是身份信息）
     Body { bytes: u64, files: u64 },
     /// 读取该处内容得到的判定依据
@@ -171,6 +180,14 @@ impl Evidence {
             },
             Evidence::DanglingReference { display_file, note } => {
                 format!("{display_file} 指向它，但目标不存在：{note}")
+            }
+            Evidence::Identification {
+                what,
+                basis,
+                confident,
+            } => {
+                let mark = if *confident { "" } else { "（不确定）" };
+                format!("这是什么：{what}{mark} —— 依据：{basis}")
             }
             Evidence::Body { bytes, files } => {
                 format!("{} 个文件 · {}（{} B）", files, human_bytes(*bytes), bytes)
@@ -356,6 +373,8 @@ pub struct ScanConfig {
     pub duplicates: bool,
     /// 进入去重判定的大小门槛（小于它不值得比对）。
     pub dup_min_bytes: u64,
+    /// 是否做内容鉴定（M5）。默认开。
+    pub identify: bool,
 }
 
 impl ScanConfig {
@@ -372,6 +391,7 @@ impl ScanConfig {
             dangling: true,
             duplicates: true,
             dup_min_bytes: 1024 * 1024,
+            identify: true,
         }
     }
 }

@@ -215,6 +215,8 @@ pub struct Detection {
     pub duplicate_total_reclaimable: u64,
     /// 按区域分布：(区域, 组数, 可回收字节)
     pub duplicate_by_area: Vec<(String, usize, u64)>,
+    /// 被内容鉴定出「这是什么」的条目数（M5）
+    pub identified: usize,
 }
 
 /// 归属探测的统计（供报告说明「这一轮问过谁、有没有问不到」）。
@@ -390,6 +392,43 @@ pub fn detect_with(
             .collect();
     }
 
+    // ---- M5：内容鉴定 ----
+    //
+    // 放在「说不清」已经算完之后 —— 因为鉴定结果要反过来**缩小**它。
+    if cfg.identify {
+        for f in det
+            .large
+            .iter_mut()
+            .chain(det.odd_location.iter_mut())
+            .chain(det.unclear.iter_mut())
+        {
+            attach_identification(f, &scan.roots);
+            if f.evidence.iter().any(|e| {
+                matches!(
+                    e,
+                    Evidence::Identification {
+                        confident: true,
+                        ..
+                    }
+                )
+            }) {
+                det.identified += 1;
+            }
+        }
+        // 已经能确定性说清「这是什么」的条目，不该再留在「说不清」里
+        det.unclear.retain(|f| {
+            !f.evidence.iter().any(|e| {
+                matches!(
+                    e,
+                    Evidence::Identification {
+                        confident: true,
+                        ..
+                    }
+                )
+            })
+        });
+    }
+
     // ---- 死符号链接（并入「失效引用」）----
     //
     // 符号链接本身是一个**存在的对象**；它「失效」是指**指向的目标**不在了。
@@ -493,6 +532,31 @@ fn is_transient_symlink(link: &crate::scan::SymlinkEntry) -> bool {
 }
 
 /// 构造一个 `Finding` 并完成引用检查。
+/// 对一条 finding 做内容鉴定并挂上证据。
+///
+/// 只对目录走结构鉴定；文件走魔数 + 头部特征。
+/// 鉴定不出来就不挂 —— 不猜。
+///
+/// `roots` 用来跳过**扫描根本身**：对 `$HOME` 或 `/opt` 说「这是什么」没有意义，
+/// 而且会误判（例：家目录里恰好有 `.dsh/`，就被说成「DSH 工作区」）。
+fn attach_identification(f: &mut Finding, roots: &[std::path::PathBuf]) {
+    if roots.iter().any(|r| r == &f.path) {
+        return;
+    }
+    let id = if f.path.is_dir() {
+        crate::identify::identify_dir(&f.path)
+    } else {
+        crate::identify::identify_file(&f.path)
+    };
+    if let Some(id) = id {
+        f.evidence.push(Evidence::Identification {
+            what: id.what,
+            basis: id.basis,
+            confident: id.confident,
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_finding(
     path: &Path,
@@ -1011,6 +1075,97 @@ mod tests {
 
             let _ = fs::remove_dir_all(&home);
         }
+    }
+
+    #[test]
+    fn confidently_identified_dirs_leave_the_unclear_partition() {
+        let home = tmpdir("m5");
+        // ① 可确定性识别：Minecraft 结构
+        let mc = home.join("mcdata");
+        fs::create_dir_all(mc.join("saves")).unwrap();
+        fs::write(
+            mc.join("options.txt"),
+            b"fov:70
+",
+        )
+        .unwrap();
+        // ② 认不出来
+        let odd = home.join("mystery");
+        fs::create_dir_all(&odd).unwrap();
+        fs::write(odd.join("a.bin"), b"\x00\x01\x02").unwrap();
+
+        let cfg = config_for(&home);
+        let scan = crate::scan::scan(&cfg);
+        let th = Thresholds {
+            large_bytes: u64::MAX, // 不让「体积异常」把它们提前认领
+            unclear_bytes: 1,
+            ..Thresholds::default()
+        };
+        let det = detect_with(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+            th,
+        );
+
+        let unclear_names: Vec<String> =
+            det.unclear.iter().map(|f| f.display_path.clone()).collect();
+        assert!(
+            !unclear_names.iter().any(|p| p.contains("mcdata")),
+            "已能确定性识别的目录不应留在「说不清」: {unclear_names:?}"
+        );
+        assert!(
+            unclear_names.iter().any(|p| p.contains("mystery")),
+            "认不出来的仍应在「说不清」: {unclear_names:?}"
+        );
+        assert!(det.identified >= 1, "应至少识别出 1 项");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn identification_is_attached_as_evidence_with_basis() {
+        let home = tmpdir("m5ev");
+        let mc = home.join("mcdata");
+        fs::create_dir_all(mc.join("saves")).unwrap();
+        fs::write(mc.join("options.txt"), b"x").unwrap();
+
+        let cfg = config_for(&home);
+        let scan = crate::scan::scan(&cfg);
+        let th = Thresholds {
+            large_bytes: 1,
+            ..Thresholds::default()
+        };
+        let det = detect_with(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+            th,
+        );
+        let f = det
+            .large
+            .iter()
+            .find(|f| f.display_path.contains("mcdata"))
+            .expect("应在体积异常里");
+        let id = f
+            .evidence
+            .iter()
+            .find_map(|e| match e {
+                Evidence::Identification {
+                    what,
+                    basis,
+                    confident,
+                } => Some((what.clone(), basis.clone(), *confident)),
+                _ => None,
+            })
+            .expect("应带 Identification 证据");
+        assert!(id.0.contains("Minecraft"), "{id:?}");
+        assert!(id.1.contains("特征项"), "依据应描述结构: {id:?}");
+        assert!(id.2, "结构证据应标为确定");
+
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

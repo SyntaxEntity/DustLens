@@ -13,6 +13,7 @@ pub mod archive;
 pub mod dangling;
 pub mod detect;
 pub mod duplicates;
+pub mod identify;
 pub mod presets;
 pub mod provenance;
 pub mod refs;

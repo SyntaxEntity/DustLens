@@ -1,13 +1,13 @@
 # DustLens
 
 ![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue?style=for-the-badge&logo=rust)
-![status](https://img.shields.io/badge/status-M4%20dedupe%20ready-blue?style=for-the-badge)
+![status](https://img.shields.io/badge/status-M5%20identify%20ready-blue?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
 ![DeepSeek Assisted Development](https://img.shields.io/badge/DeepSeek%20Assisted-Development-brightgreen?style=for-the-badge&logo=deepseek)
 
 > 目录整洁度诊断器 —— 只声明形式属性、附上引用证据，把「需不需要」的判断权完整交给用户。
 
-> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M4 可用**（诊断 + 归属 + 失效引用 + 冗余副本 + 归档）｜ 已知限制见 [已知限制](#已知限制)
+> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M5 可用**（诊断 + 内容鉴定 + 归属 + 失效引用 + 冗余副本 + 归档）｜ 已知限制见 [已知限制](#已知限制)
 
 ---
 
@@ -68,6 +68,31 @@
 
 **它就是靠 LLM 做鉴定的工具。** 担心隐私，你有三个选择：
 把敏感目录放进排除清单、干脆不配 LLM、或者**自己部署**一个本地模型端点。
+
+### 内容鉴定：这是什么（M5）
+
+**不依赖 LLM** 地回答「这是什么」，三层依据从硬到软：
+
+| 层 | 依据 | 强度 |
+|---|---|---|
+| 1 | **目录结构**（`saves/`+`options.txt`、`Cargo.toml`、`.git`…） | 强：结构不是猜的 |
+| 2 | **文件魔数**（ELF / PNG / PDF / ZIP / SQLite…） | 强：只看前 16 字节 |
+| 3 | **前 4 KiB 文本特征**（JSON / 脚本 / Markdown / systemd unit…） | 中：观察头部 |
+
+```
+$HOME/Pictures         → 图片合集（以 .png 为主）
+$HOME/Projects/MemStack → Rust 项目（含构建描述）
+/opt/wechat            → ELF 可执行文件 / 共享库
+```
+
+三条硬约束：
+
+- **只读、只在本机**：不联网、不上传，报告里只出现**文件名与结构**，不出现文件内容
+- **不确定性要标出来**：标为「不确定」的结论**不会**用来把条目移出「说不清」——
+  用猜测消灭不确定性等于自欺
+- **不猜价值**：只说「这是什么」，不说「该不该留」
+
+能被确定性识别的条目会自动移出「说不清」分区 —— 那个分区只留下真正说不清的。
 
 ### 归属：谁装的（P0）
 
@@ -227,6 +252,7 @@ dustlens scan --presets all
 dustlens scan ~/x --no-provenance     # 不 fork 包管理器
 dustlens scan ~/x --no-dangling       # 不查失效引用
 dustlens scan ~/x --no-duplicates     # 不查冗余副本（最省时间）
+dustlens scan ~/x --no-identify       # 不做内容鉴定
 dustlens scan ~/x --dup-min-bytes 10485760   # 只比对 ≥10 MiB 的文件
 
 # 归档（可恢复，不是删除）
@@ -278,6 +304,7 @@ DustLens/
 │   │       ├── provenance.rs      # 归属：rpm / dpkg / pacman / flatpak
 │   │       ├── dangling.rs        # 失效引用（七道噪音过滤）
 │   │       ├── duplicates.rs      # 冗余副本（三级过滤 + 逐字节核对）
+│   │       ├── identify.rs        # 内容鉴定（结构 / 魔数 / 头部文本，不依赖 LLM）
 │   │       ├── presets.rs         # 重灾区预设
 │   │       └── report.rs          # JSON + Markdown 渲染
 │   └── dustlens-cli/              # 命令行（clap）
@@ -329,6 +356,9 @@ DustLens/
 - **去重默认门槛 1 MiB**：更小的文件不参与比对（否则 IO 成本失控）。
 - **明细有上限**：报告最多列 100 组、每组最多 20 个成员；
   但摘要里的「组数 / 可回收」是**全量真实统计**，不是截断值。
+- **内容鉴定是启发式**：结构规则只看直接子项；扩展名主导向最多下探一层。
+  认不出来就标「未识别」，**不会**用猜测把条目移出「说不清」。
+- **鉴定只读头部 4 KiB 与目录项名字**，不读文件全文；报告里不出现文件内容。
 - **「位置异常」判据很窄**：只认**随手区域**（`Downloads` / `Desktop` / `Templates`）与扫描根之下的构建产物。
   更深的位置视为用户有意组织，不做判定。
 - **归档不保留**：硬链接会退化成独立副本；扩展属性 / ACL / 所有权（uid/gid）不保留。
@@ -348,7 +378,7 @@ DustLens/
 | **M1** | **core**：BFS 扫描 + 目录级体积聚合 + 引用证据三级 + 四类检测 + 盲区披露 + JSON/Markdown | ✅ **完成**（v0.1.0） |
 | **M2** | **归档与恢复**：按版本整批恢复、冲突整批拒绝、`discard` 真正释放空间 | ✅ **完成** |
 | **M4** | **冗余副本**：尺寸 → 前 16 KiB → 逐字节三级过滤 + 区域分布 | ✅ **完成** |
-| M5 | 内容鉴定（魔数 + 前 4KB + 目录特征库，**不依赖 LLM**） | ⏳ 未开始 |
+| **M5** | **内容鉴定**：目录结构 / 魔数 / 前 4 KiB 文本，**不依赖 LLM** | ✅ **完成** |
 | M6 | LLM 鉴定层（用户自配端点，默认关闭） | ⏳ 未开始 |
 | M7 | 可配置（`~/.config/dustlens/config.toml`）+ TUI | ⏳ 未开始 |
 | M8 | GUI | ⏳ 暂缓，待 M1–M6 有真实使用数据 |

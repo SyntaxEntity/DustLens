@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_duplicates: bool,
 
+    /// 关闭「内容鉴定」（读文件头与目录结构判断「这是什么」，默认开启）
+    #[arg(long, global = true)]
+    no_identify: bool,
+
     /// 去重判定的大小门槛（字节），默认 1 MiB
     #[arg(long, global = true, value_name = "BYTES")]
     dup_min_bytes: Option<u64>,
@@ -285,6 +289,7 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
     cfg.provenance = !cli.no_provenance;
     cfg.dangling = !cli.no_dangling;
     cfg.duplicates = !cli.no_duplicates;
+    cfg.identify = !cli.no_identify;
     if let Some(n) = cli.dup_min_bytes {
         cfg.dup_min_bytes = n;
     }
