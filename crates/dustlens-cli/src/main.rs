@@ -43,6 +43,14 @@ struct Cli {
     #[arg(long, global = true)]
     no_dangling: bool,
 
+    /// 关闭「冗余副本」探测（按内容比对，默认开启）
+    #[arg(long, global = true)]
+    no_duplicates: bool,
+
+    /// 去重判定的大小门槛（字节），默认 1 MiB
+    #[arg(long, global = true, value_name = "BYTES")]
+    dup_min_bytes: Option<u64>,
+
     /// 跟随符号链接（默认不跟随 —— 跨系统引用的常见陷阱）
     #[arg(long, global = true)]
     follow_symlinks: bool,
@@ -276,6 +284,10 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
     cfg.threads = cli.threads;
     cfg.provenance = !cli.no_provenance;
     cfg.dangling = !cli.no_dangling;
+    cfg.duplicates = !cli.no_duplicates;
+    if let Some(n) = cli.dup_min_bytes {
+        cfg.dup_min_bytes = n;
+    }
 
     eprintln!("扫描中…（只读，不会修改任何文件）");
     let t0 = std::time::Instant::now();

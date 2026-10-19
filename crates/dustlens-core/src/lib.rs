@@ -11,9 +11,10 @@
 
 pub mod archive;
 pub mod dangling;
+pub mod detect;
+pub mod duplicates;
 pub mod presets;
 pub mod provenance;
-pub mod detect;
 pub mod refs;
 pub mod report;
 pub mod scan;
@@ -22,9 +23,10 @@ pub mod types;
 use std::path::PathBuf;
 
 pub use detect::{detect_with, Detection, DetectionStats, Thresholds};
+pub use duplicates::{DupMember, DuplicateSet};
 pub use provenance::Prober;
 pub use refs::{load_processes, ProcessIndex, ReferenceIndex};
-pub use report::{Report, OccupancyRow};
+pub use report::{OccupancyRow, Report};
 pub use scan::{RawScan, ScanStats};
 pub use types::{
     display_path, human_bytes, Evidence, ExcludeRule, Finding, FindingKind, GapKind, LinkStrength,

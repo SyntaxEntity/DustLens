@@ -1,13 +1,13 @@
 # DustLens
 
 ![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue?style=for-the-badge&logo=rust)
-![status](https://img.shields.io/badge/status-M3%20provenance%20ready-blue?style=for-the-badge)
+![status](https://img.shields.io/badge/status-M4%20dedupe%20ready-blue?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
 ![DeepSeek Assisted Development](https://img.shields.io/badge/DeepSeek%20Assisted-Development-brightgreen?style=for-the-badge&logo=deepseek)
 
 > 目录整洁度诊断器 —— 只声明形式属性、附上引用证据，把「需不需要」的判断权完整交给用户。
 
-> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M3 可用**（诊断 + 归属 + 失效引用 + 归档）｜ 已知限制见 [已知限制](#已知限制)
+> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M4 可用**（诊断 + 归属 + 失效引用 + 冗余副本 + 归档）｜ 已知限制见 [已知限制](#已知限制)
 
 ---
 
@@ -99,6 +99,30 @@ $HOME/Downloads/xxx.zip   ← $HOME/.config/JetBrains/CLion2026.2/options/projec
 **只陈述事实**：不推断「所以那个应用该删」。目标本身已经不在了，没有可归档的内容。
 
 为了不刷屏，这条判据有七道过滤器（见 `## 已知限制`）。
+
+### 冗余副本（M4）
+
+内容**逐字节相同**的多份文件，按组列出：
+
+```
+组 1 · 499 MiB × 2 份 · 可回收 499 MiB
+  $HOME/Documents/A408/…/01.高数基础01.mp4
+  $HOME/Documents/A408/…/01.高数基础01【务必关注公众号…】.mp4
+```
+
+**不指定留哪一份** —— 只按组罗列成员（P1）。
+
+判定用三级过滤，最后一级是**实际逐字节比对**，不是哈希猜测：
+
+| 级别 | 依据 | 成本 |
+|---|---|---|
+| 1 | 尺寸相同 | 零 IO |
+| 2 | 前 16 KiB 相同 | 每文件读 16 KiB |
+| 3 | 逐字节相同 | 只对少量幸存者读全文 |
+
+报告里还给出**按区域的分布**（例如「38 GiB 在 Steam 里、509 MiB 在 Documents 里」），
+因为「可回收 42 GiB」这个总量本身很容易被误读 —— Steam 的各个 Proton 版本各自带同一份运行时库，
+内容相同但是必需的。
 
 ### 版本化归档（M2）
 
@@ -195,6 +219,8 @@ dustlens scan --presets all
 # 关闭某个探测（默认都开）
 dustlens scan ~/x --no-provenance     # 不 fork 包管理器
 dustlens scan ~/x --no-dangling       # 不查失效引用
+dustlens scan ~/x --no-duplicates     # 不查冗余副本（最省时间）
+dustlens scan ~/x --dup-min-bytes 10485760   # 只比对 ≥10 MiB 的文件
 
 # 归档（可恢复，不是删除）
 dustlens archive create ~/old-stuff --note "旧项目"
@@ -244,6 +270,7 @@ DustLens/
 │   │       ├── archive.rs         # 版本化归档（整批恢复，禁止单条）
 │   │       ├── provenance.rs      # 归属：rpm / dpkg / pacman / flatpak
 │   │       ├── dangling.rs        # 失效引用（七道噪音过滤）
+│   │       ├── duplicates.rs      # 冗余副本（三级过滤 + 逐字节核对）
 │   │       ├── presets.rs         # 重灾区预设
 │   │       └── report.rs          # JSON + Markdown 渲染
 │   └── dustlens-cli/              # 命令行（clap）
@@ -287,6 +314,11 @@ DustLens/
 - **失效引用只判定家目录内的目标**，且只读「像配置」的文件（`.json/.toml/.ini/.conf/.desktop/…`）。
   运行期日志与数据库（leveldb 的 `LOG`、`MANIFEST-*`）被排除在外 ——
   否则它们里面含空格的路径会产生成批假阳性。
+- **冗余副本会读文件内容**：家目录级扫描（25k 个 ≥1 MiB 文件）约多花 **1–2 分钟**。
+  不想付这个成本就加 `--no-duplicates`，或把 `--dup-min-bytes` 调高。
+- **去重默认门槛 1 MiB**：更小的文件不参与比对（否则 IO 成本失控）。
+- **明细有上限**：报告最多列 100 组、每组最多 20 个成员；
+  但摘要里的「组数 / 可回收」是**全量真实统计**，不是截断值。
 - **「位置异常」判据很窄**：只认**随手区域**（`Downloads` / `Desktop` / `Templates`）与扫描根之下的构建产物。
   更深的位置视为用户有意组织，不做判定。
 - **归档不保留**：硬链接会退化成独立副本；扩展属性 / ACL / 所有权（uid/gid）不保留。
@@ -305,7 +337,7 @@ DustLens/
 | M0 | 设计冻结：定位、八条不定项、引用证据三级、隐私模型 | ✅ 完成 |
 | **M1** | **core**：BFS 扫描 + 目录级体积聚合 + 引用证据三级 + 四类检测 + 盲区披露 + JSON/Markdown | ✅ **完成**（v0.1.0） |
 | **M2** | **归档与恢复**：按版本整批恢复、冲突整批拒绝、`discard` 真正释放空间 | ✅ **完成** |
-| M4 | 冗余副本（按内容哈希去重，用上已有的 `Duplicate` 证据） | ⏳ 未开始 |
+| **M4** | **冗余副本**：尺寸 → 前 16 KiB → 逐字节三级过滤 + 区域分布 | ✅ **完成** |
 | M5 | 内容鉴定（魔数 + 前 4KB + 目录特征库，**不依赖 LLM**） | ⏳ 未开始 |
 | M6 | LLM 鉴定层（用户自配端点，默认关闭） | ⏳ 未开始 |
 | M7 | 可配置（`~/.config/dustlens/config.toml`）+ TUI | ⏳ 未开始 |

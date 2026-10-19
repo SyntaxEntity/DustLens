@@ -10,6 +10,7 @@
 //! `.minecraft` / `.cargo` / `.rustup` 全都违反 XDG 且全都正常（见设计共识 §3.2）。
 
 use crate::dangling;
+use crate::duplicates::{self, DuplicateSet};
 use crate::refs::{self, ProcessIndex, ReferenceIndex};
 use crate::scan::{DirTotal, LooseFile, RawScan};
 use crate::types::{
@@ -17,7 +18,6 @@ use crate::types::{
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-
 
 /// 产物目录名 → (生成器, 触发重建所需的项目文件)。
 ///
@@ -207,6 +207,14 @@ pub struct Detection {
     pub stats: DetectionStats,
     /// 归属探测（P0）统计
     pub provenance: ProvenanceStats,
+    /// 冗余副本（M4）：内容完全相同的文件组（明细，最多 MAX_SETS 组）
+    pub duplicates: Vec<DuplicateSet>,
+    /// 真实组数（不受明细上限影响）
+    pub duplicate_total_sets: usize,
+    /// 真实可回收字节（不受明细上限影响）
+    pub duplicate_total_reclaimable: u64,
+    /// 按区域分布：(区域, 组数, 可回收字节)
+    pub duplicate_by_area: Vec<(String, usize, u64)>,
 }
 
 /// 归属探测的统计（供报告说明「这一轮问过谁、有没有问不到」）。
@@ -287,15 +295,26 @@ pub fn detect_with(
     // 因此下探到两层，再按「是否已被更上层条目包含」去重 ——
     // 保留最上层的具体目录，避免 `Projects` 把 `MemStack/target` 吞掉。
     for root in &scan.roots {
-        let Ok(root) = root.canonicalize() else { continue };
-        let mut candidates: Vec<DirTotal> =
-            scan.dirs.iter().filter(|d| d.path == root).cloned().collect();
-        candidates.extend(scan.dirs.iter().filter(|d| {
-            // 直接子目录
-            d.path.parent() == Some(root.as_path())
+        let Ok(root) = root.canonicalize() else {
+            continue;
+        };
+        let mut candidates: Vec<DirTotal> = scan
+            .dirs
+            .iter()
+            .filter(|d| d.path == root)
+            .cloned()
+            .collect();
+        candidates.extend(
+            scan.dirs
+                .iter()
+                .filter(|d| {
+                    // 直接子目录
+                    d.path.parent() == Some(root.as_path())
                 // 二层子目录
                 || d.path.parent().and_then(|p| p.parent()) == Some(root.as_path())
-        }).cloned());
+                })
+                .cloned(),
+        );
         // 深层优先保留：若候选 A 包含候选 B 且两者都在榜，去掉 A（保留更具体的 B）
         candidates.sort_by_key(|d| std::cmp::Reverse(d.path.components().count()));
         for d in candidates {
@@ -340,6 +359,15 @@ pub fn detect_with(
         .cloned()
         .collect();
     det.loose.sort_by_key(|b| std::cmp::Reverse(b.bytes));
+
+    // ---- M4：冗余副本 ----
+    if cfg.duplicates {
+        let rep = duplicates::find(&scan.big_files, procs, refs, home);
+        det.duplicates = rep.sets;
+        det.duplicate_total_sets = rep.total_sets;
+        det.duplicate_total_reclaimable = rep.total_reclaimable;
+        det.duplicate_by_area = rep.by_area;
+    }
 
     // ---- P1：失效引用 ----
     if cfg.dangling {
@@ -454,9 +482,8 @@ fn detect_odd_locations(
     //   · 扫描根之下，或
     //   · 下载 / 桌面 / 模板 这三个「用户随手放东西」的目录之下。
     // 更深的位置说明用户是**有意组织**的，不构成异常。
-    const CARELESS_PARENTS: &[&str] = &[
-        "Downloads", "Desktop", "Templates", "下载", "桌面", "模板",
-    ];
+    const CARELESS_PARENTS: &[&str] =
+        &["Downloads", "Desktop", "Templates", "下载", "桌面", "模板"];
 
     let roots: Vec<PathBuf> = scan
         .roots
@@ -543,7 +570,9 @@ fn detect_unclear(
     let mut stats = DetectionStats::default();
 
     for root in &scan.roots {
-        let Ok(root) = root.canonicalize() else { continue };
+        let Ok(root) = root.canonicalize() else {
+            continue;
+        };
         for d in &scan.dirs {
             if d.path.parent() != Some(root.as_path()) {
                 continue;
@@ -652,9 +681,7 @@ fn detect_non_compliant(
         if XDG_OK.contains(&name) {
             continue;
         }
-        if USER_DIRS.iter().any(|u| name.eq_ignore_ascii_case(u))
-            || USER_DIRS_ZH.contains(&name)
-        {
+        if USER_DIRS.iter().any(|u| name.eq_ignore_ascii_case(u)) || USER_DIRS_ZH.contains(&name) {
             continue;
         }
         // 只看**隐藏目录**（以 . 开头）——那才是「应用把数据丢在家目录根」的特征。
@@ -697,10 +724,7 @@ fn detect_non_compliant(
 
         let has_desktop = has_desktop_entry(&app, &desktop_dir, system_desktop);
 
-        let mut evidence = vec![Evidence::Body {
-            bytes,
-            files: 0,
-        }];
+        let mut evidence = vec![Evidence::Body { bytes, files: 0 }];
         evidence.extend(rf.evidence.iter().cloned());
         evidence.push(Evidence::Content {
             note: format!(
@@ -748,7 +772,7 @@ fn has_desktop_entry(app: &str, user_dir: &Path, system_dir: &Path) -> Option<bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::{ScanStats, LooseFile};
+    use crate::scan::{LooseFile, ScanStats};
     use std::fs;
 
     fn config_for(home: &Path) -> ScanConfig {
@@ -771,9 +795,16 @@ mod tests {
 
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(
-            !det.odd_location.iter().any(|f| f.path == t.canonicalize().unwrap()),
+            !det.odd_location
+                .iter()
+                .any(|f| f.path == t.canonicalize().unwrap()),
             "项目内的 target/ 不应被判为位置异常"
         );
         let _ = fs::remove_dir_all(&home);
@@ -789,7 +820,12 @@ mod tests {
 
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(
             det.odd_location
                 .iter()
@@ -813,7 +849,12 @@ mod tests {
 
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(
             det.odd_location.is_empty(),
             "深层产物不应被判为位置异常，实际: {:?}",
@@ -862,7 +903,12 @@ mod tests {
 
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
 
         let v = det
             .non_compliant
@@ -888,7 +934,12 @@ mod tests {
         }
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(
             det.non_compliant.is_empty(),
             "XDG 合规目录不应被登记为违规，实际: {:?}",
@@ -903,8 +954,15 @@ mod tests {
         // 它们本来就该在 $HOME 下（XDG user dirs），属纯假阳性。
         let home = tmpdir("userdirs");
         for d in [
-            "Pictures", "Documents", "Downloads", "Music", "Videos", "Desktop",
-            "图片", "文档", "下载",
+            "Pictures",
+            "Documents",
+            "Downloads",
+            "Music",
+            "Videos",
+            "Desktop",
+            "图片",
+            "文档",
+            "下载",
         ] {
             let p = home.join(d);
             fs::create_dir_all(&p).unwrap();
@@ -912,7 +970,12 @@ mod tests {
         }
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         let offenders: Vec<&String> = det.non_compliant.iter().map(|v| &v.app).collect();
         assert!(
             offenders.is_empty(),
@@ -931,7 +994,12 @@ mod tests {
         fs::write(p.join("f.bin"), vec![0u8; 64]).unwrap();
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(
             !det.non_compliant.iter().any(|v| v.app == "Games"),
             "非隐藏目录不应进规范违规"
@@ -947,7 +1015,12 @@ mod tests {
         fs::write(p.join("f.bin"), vec![0u8; 64]).unwrap();
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(det.non_compliant.iter().any(|v| v.app == "someapp"));
         let _ = fs::remove_dir_all(&home);
     }
@@ -982,7 +1055,11 @@ mod tests {
             .evidence
             .iter()
             .find_map(|e| match e {
-                Evidence::Generator { tool, manifest_present, .. } => Some((tool.clone(), *manifest_present)),
+                Evidence::Generator {
+                    tool,
+                    manifest_present,
+                    ..
+                } => Some((tool.clone(), *manifest_present)),
                 _ => None,
             })
             .expect("应带生成器证据");
@@ -1000,7 +1077,12 @@ mod tests {
 
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(det.unclear.is_empty(), "小目录不应进「说不清」");
         let _ = fs::remove_dir_all(&home);
     }
@@ -1021,7 +1103,12 @@ mod tests {
             }
         }
         scan.dirs.sort_by_key(|b| std::cmp::Reverse(b.bytes));
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
 
         let in_odd = det.odd_location.iter().any(|f| f.path == canon);
         let in_unclear = det.unclear.iter().any(|f| f.path == canon);
@@ -1036,7 +1123,12 @@ mod tests {
         fs::write(home.join("tiny.bin"), [0u8; 32]).unwrap();
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(det.loose.is_empty(), "小文件不进散落物榜");
         let _ = fs::remove_dir_all(&home);
     }
@@ -1063,9 +1155,15 @@ mod tests {
             excluded: vec![],
             gaps: vec![],
             stats: ScanStats::default(),
+            big_files: vec![],
         };
         let cfg = ScanConfig::new(vec![], None);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         assert!(det.large.is_empty());
         assert!(det.unclear.is_empty());
     }

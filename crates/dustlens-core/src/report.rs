@@ -8,9 +8,7 @@
 
 use crate::detect::{AppViolation, Detection, DetectionStats, LARGE_MIN_BYTES};
 use crate::scan::{LooseFile, RawScan};
-use crate::types::{
-    display_path, human_bytes, Evidence, Finding, LinkStrength, ScanConfig,
-};
+use crate::types::{display_path, human_bytes, Evidence, Finding, LinkStrength, ScanConfig};
 use serde::Serialize;
 use std::path::Path;
 
@@ -28,6 +26,8 @@ pub struct Report {
     pub odd_location: Vec<Finding>,
     /// 失效引用（P1）—— 目标已不存在，属**仅供参考**，无可归档对象
     pub dangling: Vec<Finding>,
+    /// 冗余副本（M4）
+    pub duplicates: Vec<DupSetOut>,
     pub unclear: Vec<Finding>,
     pub loose: Vec<LooseOut>,
     pub scan_gaps: Vec<ScanGapOut>,
@@ -52,6 +52,13 @@ pub struct Summary {
     pub excluded_privacy_entries: u64,
     /// 失效引用条数
     pub dangling: u64,
+    /// 冗余副本组数
+    pub duplicate_sets: u64,
+    /// 冗余副本可回收字节（每组留一份）
+    pub duplicate_reclaimable: u64,
+    pub duplicate_reclaimable_human: String,
+    /// 按区域分布：(区域, 组数, 可回收人类可读)
+    pub duplicate_areas: Vec<(String, usize, String)>,
     /// 本机可用的包管理器（用于说明「归属」能不能判）
     pub provenance_managers: Vec<String>,
     /// 归属判定为「属于某个包」的条目数
@@ -72,6 +79,23 @@ pub struct AppViolationOut {
     pub evidence: Vec<Evidence>,
     /// 恒为 true：规范违规不产出删除建议（见设计共识 §3.2）
     pub informational_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DupSetOut {
+    pub size: u64,
+    pub size_human: String,
+    pub copies: usize,
+    pub reclaimable: u64,
+    pub reclaimable_human: String,
+    pub members: Vec<DupMemberOut>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DupMemberOut {
+    pub path: String,
+    pub link_strength: crate::types::LinkStrength,
+    pub mtime_unix: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,11 +154,7 @@ pub fn build(
         schema: "dustlens.report/v1",
         dustlens_version: version,
         generated_at_unix: now_unix(),
-        roots: cfg
-            .roots
-            .iter()
-            .map(|r| display_path(r, home))
-            .collect(),
+        roots: cfg.roots.iter().map(|r| display_path(r, home)).collect(),
         // 家目录本身也必须脱敏：早先这里写成 `display_path(h, None)`，
         // 而 `home = None` 时该函数原样返回 —— 于是报告头部一直打印
         // 真实的 `/home/<用户名>`，泄漏 OS 用户名。
@@ -158,6 +178,16 @@ pub fn build(
             excluded_entries: scan.excluded.len() as u64,
             excluded_privacy_entries: privacy_count,
             dangling: det.dangling.len() as u64,
+            // 用**真实总量**，不是明细条数 —— 明细有上限
+            duplicate_sets: det.duplicate_total_sets as u64,
+            duplicate_reclaimable: det.duplicate_total_reclaimable,
+            duplicate_reclaimable_human: human_bytes(det.duplicate_total_reclaimable),
+            duplicate_areas: det
+                .duplicate_by_area
+                .iter()
+                .take(10)
+                .map(|(a, n, b)| (a.clone(), *n, human_bytes(*b)))
+                .collect(),
             provenance_managers: det
                 .provenance
                 .managers
@@ -171,23 +201,50 @@ pub fn build(
         non_compliant: det.non_compliant.iter().map(|v| to_out(v, home)).collect(),
         odd_location: det.odd_location.clone(),
         dangling: det.dangling.clone(),
+        duplicates: det
+            .duplicates
+            .iter()
+            .map(|s| DupSetOut {
+                size: s.size,
+                size_human: s.human_size(),
+                copies: s.members.len() + s.truncated,
+                reclaimable: s.reclaimable(),
+                reclaimable_human: human_bytes(s.reclaimable()),
+                members: s
+                    .members
+                    .iter()
+                    .map(|m| DupMemberOut {
+                        path: m.display_path.clone(),
+                        link_strength: m.link,
+                        mtime_unix: m.mtime_unix,
+                    })
+                    .collect(),
+            })
+            .collect(),
         unclear: det.unclear.clone(),
-        loose: det.loose.iter().map(|l| LooseOut {
-            path: display_path(&l.path, home),
-            bytes: l.bytes,
-            bytes_human: human_bytes(l.bytes),
-        }).collect(),
-        scan_gaps: scan.gaps.iter().map(|g| ScanGapOut {
-            path: g.display_path.clone(),
-            kind: g.kind,
-            kind_label: g.kind.label(),
-            detail: g.detail.clone(),
-        }).collect(),
+        loose: det
+            .loose
+            .iter()
+            .map(|l| LooseOut {
+                path: display_path(&l.path, home),
+                bytes: l.bytes,
+                bytes_human: human_bytes(l.bytes),
+            })
+            .collect(),
+        scan_gaps: scan
+            .gaps
+            .iter()
+            .map(|g| ScanGapOut {
+                path: g.display_path.clone(),
+                kind: g.kind,
+                kind_label: g.kind.label(),
+                detail: g.detail.clone(),
+            })
+            .collect(),
         excluded: ExcludedSummary {
             total: scan.excluded.len() as u64,
             privacy: privacy_count,
-            note: "被排除的项在进榜之前即被拦掉，不进任何分区；隐私项不读取内容、不写入报告"
-                .into(),
+            note: "被排除的项在进榜之前即被拦掉，不进任何分区；隐私项不读取内容、不写入报告".into(),
         },
         notes: notes(),
     };
@@ -229,6 +286,7 @@ fn notes() -> Vec<String> {
         "『无人认领』只说明没有进程或配置引用它，不等于你不需要它。".into(),
         "规范违规一节记录的是应用的存放行为，不是可删除对象的清单。".into(),
         "失效引用一节只陈述『某配置指向的目标已不存在』，目标本身已无可归档的内容。".into(),
+        "冗余副本一节按内容分组陈述事实，不指定保留哪一份 —— 那是用户的决定。".into(),
         "归属来自本机包管理器的查询结果；『不属于任何包』不等于『来路不明』——多为用户手动安装或应用自建。".into(),
         "扫描盲区一节列出未能读取的位置；未列出即代表已读到。".into(),
     ]
@@ -293,6 +351,10 @@ pub fn render_markdown(
     s.push_str(&format!(
         "- 失效引用：**{}** 条（配置指向的目标已不存在）\n",
         report.summary.dangling
+    ));
+    s.push_str(&format!(
+        "- 冗余副本：**{}** 组，每组留一份可回收 **{}**\n",
+        report.summary.duplicate_sets, report.summary.duplicate_reclaimable_human
     ));
     s.push_str(&format!(
         "- 扫描盲区：**{}** 处（见[扫描盲区](#扫描盲区)）\n",
@@ -380,6 +442,58 @@ pub fn render_markdown(
         s.push('\n');
     }
 
+    // ---- 冗余副本（M4）----
+    s.push_str("## 冗余副本\n\n");
+    if report.duplicates.is_empty() {
+        s.push_str("_本次扫描的候选文件中没有发现字节完全相同的副本。_\n\n");
+    } else {
+        s.push_str(
+            "> 以下每组文件的**内容逐字节相同**（不是哈希猜测，是实际比对）。\n\
+             > 本工具**不指定留哪一份** —— 只按组罗列成员。\n\
+             > 「可回收」是**形式计算**（每组只留一份），**不代表这些都该删**：\n\
+             > 例如 Steam 的各个 Proton 版本各自带同一份运行时库，内容相同但是必需的。\n\n",
+        );
+        // 事实性分布：让 42 GiB 这种总量能落到具体位置
+        if report.summary.duplicate_areas.len() > 1 {
+            s.push_str("### 分布\n\n| 区域 | 组数 | 可回收 |\n|---|---:|---:|\n");
+            for (area, n, bytes_h) in &report.summary.duplicate_areas {
+                s.push_str(&format!("| `{area}` | {n} | {bytes_h} |\n"));
+            }
+            s.push('\n');
+        }
+        for (i, set) in report.duplicates.iter().take(40).enumerate() {
+            s.push_str(&format!(
+                "### 组 {} · {} × {} 份 · 可回收 {}\n\n",
+                i + 1,
+                set.size_human,
+                set.copies,
+                set.reclaimable_human
+            ));
+            s.push_str("| 成员 | 体积 | 引用 |\n|---|---:|---|\n");
+            for m in &set.members {
+                s.push_str(&format!(
+                    "| `{}` | {} | {} |\n",
+                    m.path,
+                    set.size_human,
+                    m.link_strength.label()
+                ));
+            }
+            if set.copies > set.members.len() {
+                s.push_str(&format!(
+                    "\n_另有 {} 个成员未列出。_\n",
+                    set.copies - set.members.len()
+                ));
+            }
+            s.push('\n');
+        }
+        if report.duplicates.len() > 40 {
+            s.push_str(&format!(
+                "_另有 {} 组未列出（完整清单见 JSON）。_\n\n",
+                report.duplicates.len() - 40
+            ));
+        }
+    }
+
     // ---- 说不清 ----
     s.push_str("## 说不清\n\n");
     if report.unclear.is_empty() {
@@ -457,13 +571,25 @@ pub fn render_markdown(
 
         // 只详列「真正影响结论」的类别；符号链接/深度上限各举例少量
         for (kind, items) in &by_kind {
-            let cap = if *kind == "符号链接未跟随" { 5 } else { 100 };
-            s.push_str(&format!("### {}（{} 处，示例 {} 条）\n\n", kind, items.len(), cap.min(items.len())));
+            let cap = if *kind == "符号链接未跟随" {
+                5
+            } else {
+                100
+            };
+            s.push_str(&format!(
+                "### {}（{} 处，示例 {} 条）\n\n",
+                kind,
+                items.len(),
+                cap.min(items.len())
+            ));
             for g in items.iter().take(cap) {
                 s.push_str(&format!("- `{}` — {}\n", g.path, g.detail));
             }
             if items.len() > cap {
-                s.push_str(&format!("- …另有 {} 处（完整清单见 JSON）\n", items.len() - cap));
+                s.push_str(&format!(
+                    "- …另有 {} 处（完整清单见 JSON）\n",
+                    items.len() - cap
+                ));
             }
             s.push('\n');
         }
@@ -606,7 +732,12 @@ mod tests {
 
         let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
         let scan = scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         let (rep, occ) = build(&scan, &det, &cfg, "test");
         let md = render_markdown(&rep, &occ, &scan, &det, &cfg);
         let _ = fs::remove_dir_all(&home);
@@ -683,9 +814,7 @@ mod tests {
     fn dangling_referrer_is_masked_in_markdown() {
         // 回归：真实报告里曾出现 `/home/<user>/.config/...` 作为「引用它的配置」
         use crate::detect::Detection;
-        use crate::types::{
-            Evidence, Finding, FindingKind, LinkStrength, SharePolicy,
-        };
+        use crate::types::{Evidence, Finding, FindingKind, LinkStrength, SharePolicy};
 
         let home = std::env::temp_dir().join(format!("dl_dmask_{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
@@ -725,6 +854,38 @@ mod tests {
     }
 
     #[test]
+    fn duplicates_section_renders_and_never_picks_a_keeper() {
+        let home = std::env::temp_dir().join(format!("dl_dupsec_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let data = vec![3u8; 20_000];
+        fs::write(home.join("a.bin"), &data).unwrap();
+        fs::write(home.join("b.bin"), &data).unwrap();
+
+        let mut cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
+        cfg.dup_min_bytes = 1024; // 测试里文件很小，必须调低门槛
+        let scan = scan(&cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
+
+        let (rep, occ) = build(&scan, &det, &cfg, "test");
+        let md = render_markdown(&rep, &occ, &scan, &det, &cfg);
+
+        assert!(md.contains("## 冗余副本"));
+        assert!(!rep.duplicates.is_empty(), "应检出 1 组副本");
+        assert!(md.contains("a.bin") && md.contains("b.bin"));
+        // P1：不得指定留哪一份
+        for bad in ["建议保留", "保留这一份", "删掉其余", "主副本"] {
+            assert!(!md.contains(bad), "不得出现「{bad}」这类指定保留者的措辞");
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn gaps_are_reported_in_markdown() {
         let home = std::env::temp_dir().join(format!("dl_gap_{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
@@ -753,7 +914,12 @@ mod tests {
 
         let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
         let scan = scan(&cfg);
-        let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
+        let det = detect(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+        );
         let (rep, _occ) = build(&scan, &det, &cfg, "test");
         let j = render_json(&rep);
         // 三个取值都应当能以字符串形式出现（至少 unclaimed 一定出现）

@@ -39,7 +39,9 @@ impl LinkStrength {
     /// `Unclaimed` 的下一步动作提示，避免用户把「零引用」读成「可删」。
     pub fn caveat(self) -> Option<&'static str> {
         match self {
-            LinkStrength::Unclaimed => Some("无人认领 ≠ 不需要：请详细查看内容判断，或交由 LLM 分析"),
+            LinkStrength::Unclaimed => {
+                Some("无人认领 ≠ 不需要：请详细查看内容判断，或交由 LLM 分析")
+            }
             _ => None,
         }
     }
@@ -74,8 +76,6 @@ pub enum Evidence {
     DesktopReference { file: PathBuf },
     /// 是符号链接（指向何处）
     Symlink { target: PathBuf },
-    /// 同内容的其它副本
-    Duplicate { other: PathBuf },
     /// 可重建产物：生成器是否还在（形式属性，不是价值判断）
     ///
     /// 「生成器还在」意味着产物可以重新生成；「生成器不在」意味着它已退化成普通数据。
@@ -135,9 +135,6 @@ impl Evidence {
             }
             Evidence::Symlink { target } => {
                 format!("符号链接 → {}", display_path(target, home))
-            }
-            Evidence::Duplicate { other } => {
-                format!("与 {} 内容相同", display_path(other, home))
             }
             Evidence::Generator {
                 artifact,
@@ -348,6 +345,10 @@ pub struct ScanConfig {
     pub provenance: bool,
     /// 是否探测「失效引用」（P1）。默认开。
     pub dangling: bool,
+    /// 是否探测「冗余副本」（M4）。默认开。
+    pub duplicates: bool,
+    /// 进入去重判定的大小门槛（小于它不值得比对）。
+    pub dup_min_bytes: u64,
 }
 
 impl ScanConfig {
@@ -362,6 +363,8 @@ impl ScanConfig {
             threads: 0,
             provenance: true,
             dangling: true,
+            duplicates: true,
+            dup_min_bytes: 1024 * 1024,
         }
     }
 }
@@ -412,11 +415,9 @@ impl ExcludeRule {
         if self.components.len() > comps.len() {
             return false;
         }
-        comps.windows(self.components.len()).any(|w| {
-            w.iter()
-                .zip(self.components.iter())
-                .all(|(a, b)| a == b)
-        })
+        comps
+            .windows(self.components.len())
+            .any(|w| w.iter().zip(self.components.iter()).all(|(a, b)| a == b))
     }
 
     /// 隐私级排除：命中后连「说不清」都不进，避免把 `.ssh` 列出来。
@@ -536,7 +537,12 @@ mod tests {
     fn exclude_rule_matches_nested_component_sequence() {
         let rule = ExcludeRule::new(&[".local", "share", "keyrings"], "test");
         assert!(rule.matches(&p(&[
-            "home", "alice", ".local", "share", "keyrings", "login.keyring"
+            "home",
+            "alice",
+            ".local",
+            "share",
+            "keyrings",
+            "login.keyring"
         ])));
         // 顺序不对不应命中
         assert!(!rule.matches(&p(&["home", "alice", ".local", "keyrings", "share"])));
@@ -571,10 +577,7 @@ mod tests {
             file: p(&["home", "a", ".config", "x"]),
         };
         assert_eq!(will_use.strength(), Some(LinkStrength::WillUse));
-        let identity = Evidence::Body {
-            bytes: 1,
-            files: 1,
-        };
+        let identity = Evidence::Body { bytes: 1, files: 1 };
         assert_eq!(identity.strength(), None);
     }
 }

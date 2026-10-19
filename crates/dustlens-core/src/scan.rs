@@ -6,9 +6,7 @@
 //! - **默认停留在同一文件系统** —— 避免把网络盘/NTFS 挂载算进体积。
 //! - **任何读取失败都进 `ScanGap`**，不允许静默跳过。
 
-use crate::types::{
-    display_path, Evidence, GapKind, ScanConfig, ScanGap,
-};
+use crate::types::{display_path, Evidence, GapKind, ScanConfig, ScanGap};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,6 +35,15 @@ pub struct RawScan {
     /// 盲区
     pub gaps: Vec<ScanGap>,
     pub stats: ScanStats,
+    /// 候选去重文件（体积 ≥ `dup_min_bytes` 的常规文件；仅在开启去重时收集）
+    pub big_files: Vec<BigFile>,
+}
+
+/// 一个候选去重文件。
+#[derive(Debug, Clone)]
+pub struct BigFile {
+    pub path: PathBuf,
+    pub len: u64,
 }
 
 /// 一个目录的累计体积。
@@ -69,6 +76,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
     let mut gaps: Vec<ScanGap> = Vec::new();
     let mut excluded: Vec<ExcludedHit> = Vec::new();
     let mut loose_files: Vec<LooseFile> = Vec::new();
+    let mut big_files: Vec<BigFile> = Vec::new();
     let mut dirs: Vec<DirTotal> = Vec::new();
     let stats = Arc::new(Mutex::new(ScanStats::default()));
 
@@ -124,6 +132,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
         let gaps_m: Arc<Mutex<Vec<ScanGap>>> = Arc::new(Mutex::new(Vec::new()));
         let excl_m: Arc<Mutex<Vec<ExcludedHit>>> = Arc::new(Mutex::new(Vec::new()));
         let loose_m: Arc<Mutex<Vec<LooseFile>>> = Arc::new(Mutex::new(Vec::new()));
+        let big_m: Arc<Mutex<Vec<BigFile>>> = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
 
         std::thread::scope(|s| {
@@ -133,6 +142,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
                 let gaps_m = Arc::clone(&gaps_m);
                 let excl_m = Arc::clone(&excl_m);
                 let loose_m = Arc::clone(&loose_m);
+                let big_m = Arc::clone(&big_m);
                 let stats = Arc::clone(&stats);
                 let active = Arc::clone(&active);
                 let root = root.clone();
@@ -220,7 +230,10 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
                                         Ok(tm) if tm.is_dir() => {
                                             if cfg.one_filesystem && dev_of(&path) != root_dev {
                                                 gaps_m.lock().unwrap().push(ScanGap {
-                                                    display_path: display_path(&path, home.as_deref()),
+                                                    display_path: display_path(
+                                                        &path,
+                                                        home.as_deref(),
+                                                    ),
                                                     kind: GapKind::CrossDevice,
                                                     detail: "链接指向其它文件系统，已跳过".into(),
                                                 });
@@ -268,6 +281,13 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
                                         loose_m.lock().unwrap().push(LooseFile {
                                             path: path.clone(),
                                             bytes: md.len(),
+                                        });
+                                    }
+                                    // 去重候选：只收够大的文件，避免把几十万小文件塞进内存
+                                    if cfg.duplicates && md.len() >= cfg.dup_min_bytes {
+                                        big_m.lock().unwrap().push(BigFile {
+                                            path: path.clone(),
+                                            len: md.len(),
                                         });
                                     }
                                 }
@@ -318,6 +338,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
         gaps.extend(Arc::try_unwrap(gaps_m).unwrap().into_inner().unwrap());
         excluded.extend(Arc::try_unwrap(excl_m).unwrap().into_inner().unwrap());
         loose_files.extend(Arc::try_unwrap(loose_m).unwrap().into_inner().unwrap());
+        big_files.extend(Arc::try_unwrap(big_m).unwrap().into_inner().unwrap());
     }
 
     // 散落物与目录去重排序
@@ -336,6 +357,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
         excluded,
         gaps,
         stats,
+        big_files,
     }
 }
 
@@ -429,13 +451,7 @@ mod tests {
             },
         ];
         accumulate_upward(&mut nodes);
-        let by = |p: &str| {
-            nodes
-                .iter()
-                .find(|n| n.path == *p)
-                .unwrap()
-                .clone()
-        };
+        let by = |p: &str| nodes.iter().find(|n| n.path == *p).unwrap().clone();
         assert_eq!(by("/r/a/b").bytes, 30);
         // /r/a 自身 20 + 子 30
         assert_eq!(by("/r/a").bytes, 50);
