@@ -37,6 +37,20 @@ pub struct RawScan {
     pub stats: ScanStats,
     /// 候选去重文件（体积 ≥ `dup_min_bytes` 的常规文件；仅在开启去重时收集）
     pub big_files: Vec<BigFile>,
+    /// 扫描中遇到的符号链接（无论是否跟随）
+    ///
+    /// 记下来是为了判断「指向的目标还在不在」—— 死符号链接属于「失效引用」。
+    pub symlinks: Vec<SymlinkEntry>,
+}
+
+/// 一个符号链接及其目标状态。
+#[derive(Debug, Clone)]
+pub struct SymlinkEntry {
+    pub path: PathBuf,
+    /// `readlink` 得到的原始目标（可能是相对路径）
+    pub target: PathBuf,
+    /// 目标是否存在（`false` 即死符号链接）
+    pub target_exists: bool,
 }
 
 /// 一个候选去重文件。
@@ -77,6 +91,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
     let mut excluded: Vec<ExcludedHit> = Vec::new();
     let mut loose_files: Vec<LooseFile> = Vec::new();
     let mut big_files: Vec<BigFile> = Vec::new();
+    let mut symlinks: Vec<SymlinkEntry> = Vec::new();
     let mut dirs: Vec<DirTotal> = Vec::new();
     let stats = Arc::new(Mutex::new(ScanStats::default()));
 
@@ -133,6 +148,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
         let excl_m: Arc<Mutex<Vec<ExcludedHit>>> = Arc::new(Mutex::new(Vec::new()));
         let loose_m: Arc<Mutex<Vec<LooseFile>>> = Arc::new(Mutex::new(Vec::new()));
         let big_m: Arc<Mutex<Vec<BigFile>>> = Arc::new(Mutex::new(Vec::new()));
+        let link_m: Arc<Mutex<Vec<SymlinkEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
 
         std::thread::scope(|s| {
@@ -143,6 +159,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
                 let excl_m = Arc::clone(&excl_m);
                 let loose_m = Arc::clone(&loose_m);
                 let big_m = Arc::clone(&big_m);
+                let link_m = Arc::clone(&link_m);
                 let stats = Arc::clone(&stats);
                 let active = Arc::clone(&active);
                 let root = root.clone();
@@ -216,6 +233,15 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
 
                                 let ft = md.file_type();
                                 if ft.is_symlink() {
+                                    // 无论是否跟随，都记一条：死符号链接是「失效引用」的证据
+                                    if let Ok(target) = fs::read_link(&path) {
+                                        let exists = fs::metadata(&path).is_ok();
+                                        link_m.lock().unwrap().push(SymlinkEntry {
+                                            path: path.clone(),
+                                            target,
+                                            target_exists: exists,
+                                        });
+                                    }
                                     if !cfg.follow_symlinks {
                                         // 符号链接不跟随，但要登记（可能是跨系统引用）
                                         gaps_m.lock().unwrap().push(ScanGap {
@@ -339,6 +365,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
         excluded.extend(Arc::try_unwrap(excl_m).unwrap().into_inner().unwrap());
         loose_files.extend(Arc::try_unwrap(loose_m).unwrap().into_inner().unwrap());
         big_files.extend(Arc::try_unwrap(big_m).unwrap().into_inner().unwrap());
+        symlinks.extend(Arc::try_unwrap(link_m).unwrap().into_inner().unwrap());
     }
 
     // 散落物与目录去重排序
@@ -358,6 +385,7 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
         gaps,
         stats,
         big_files,
+        symlinks,
     }
 }
 
@@ -527,6 +555,33 @@ mod tests {
             .any(|e| e.privacy && e.display_path.ends_with(".ssh")));
         assert_eq!(raw.stats.files_seen, 1, "只应扫到 keep.txt");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collects_symlinks_with_target_state() {
+        #[cfg(unix)]
+        {
+            let tmp = std::env::temp_dir().join(format!("dl_link_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&tmp);
+            fs::create_dir_all(&tmp).unwrap();
+            fs::write(tmp.join("real.txt"), b"x").unwrap();
+            std::os::unix::fs::symlink(tmp.join("real.txt"), tmp.join("good.link")).unwrap();
+            std::os::unix::fs::symlink(tmp.join("gone.txt"), tmp.join("dead.link")).unwrap();
+            // 相对目标
+            std::os::unix::fs::symlink("real.txt", tmp.join("rel.link")).unwrap();
+
+            let cfg = ScanConfig::new(vec![tmp.clone()], Some(tmp.clone()));
+            let raw = scan(&cfg);
+
+            assert_eq!(raw.symlinks.len(), 3, "三个链接都应被登记");
+            let by = |n: &str| raw.symlinks.iter().find(|s| s.path.ends_with(n)).unwrap();
+            assert!(by("good.link").target_exists);
+            assert!(!by("dead.link").target_exists, "死链接必须被识别");
+            assert!(by("rel.link").target_exists, "相对目标也要判定");
+            assert_eq!(by("rel.link").target, PathBuf::from("real.txt"));
+
+            let _ = fs::remove_dir_all(&tmp);
+        }
     }
 
     #[test]

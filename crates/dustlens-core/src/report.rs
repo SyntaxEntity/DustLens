@@ -405,33 +405,82 @@ pub fn render_markdown(
         s.push_str("_本次扫描没有发现指向已消失目标的配置引用。_\n\n");
     } else {
         s.push_str(
-            "> **只陈述事实**：以下配置里记录的路径，在本机**已经不存在**。\n\
+            "> **只陈述事实**：以下路径在本机**已经不存在**，或**指向它们的东西已失效**。\n\
+             > 来源有两类：① 配置里记录的路径；② **指向已消失目标的符号链接**。\n\
              > 这不代表「那个应用该删」—— 目标已经不在了，本节不产出任何操作建议。\n\
-             > 判定范围：仅限**家目录内**的目标；且要求**父目录存在**（否则多半是文档里的示例路径）。\n\n",
+             > 配置类判定范围：仅限**家目录内**的目标；且要求**父目录存在**（否则多半是文档示例路径）。\n\n",
         );
-        s.push_str("| 配置中记录的路径（已不存在） | 引用它的配置 | 依据 |\n|---|---|---|\n");
-        for f in report.dangling.iter().take(60) {
-            // 引用它的配置路径也要脱敏 —— 否则 Markdown 里会出现绝对家目录
-            let referrer = f
+        s.push_str("| 位置（已不存在 / 已失效） | 来源 | 依据 |\n|---|---|---|\n");
+        // 符号链接按「所在目录」聚合：同一个 node_modules 里 79 条死链接逐条列出
+        // 会把真正的信号埋掉（这是本项目反复踩过的坑）。
+        let mut link_by_dir: std::collections::BTreeMap<String, (usize, String, String)> =
+            std::collections::BTreeMap::new();
+        let mut non_link: Vec<&Finding> = Vec::new();
+        for f in &report.dangling {
+            let is_link = f
                 .evidence
                 .iter()
-                .find_map(|e| match e {
-                    Evidence::DanglingReference { display_file, .. } => Some(display_file.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "?".into());
-            let note = f
-                .evidence
-                .iter()
-                .find_map(|e| match e {
-                    Evidence::DanglingReference { note, .. } => Some(note.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+                .any(|e| matches!(e, Evidence::Symlink { .. }));
+            if is_link {
+                let dir = f
+                    .display_path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_else(|| "$HOME".into());
+                let target = f
+                    .evidence
+                    .iter()
+                    .find_map(|e| match e {
+                        Evidence::Symlink { display_target } => Some(display_target.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let e = link_by_dir
+                    .entry(dir)
+                    .or_insert((0, target, f.display_path.clone()));
+                e.0 += 1;
+            } else {
+                non_link.push(f);
+            }
+        }
+        for f in non_link.iter().take(60) {
+            // 两种来源：配置引用（DanglingReference）与死符号链接（Symlink）。
+            // 两者的展示路径都已在构造时脱敏。
+            let (source, note) = if let Some((file, note)) = f.evidence.iter().find_map(|e| match e
+            {
+                Evidence::DanglingReference { display_file, note } => {
+                    Some((display_file.clone(), note.clone()))
+                }
+                _ => None,
+            }) {
+                (format!("`{file}`"), note)
+            } else if let Some(target) = f.evidence.iter().find_map(|e| match e {
+                Evidence::Symlink { display_target } => Some(display_target.clone()),
+                _ => None,
+            }) {
+                (
+                    "（符号链接本身）".to_string(),
+                    format!("这是个符号链接，指向的目标已消失 → `{target}`"),
+                )
+            } else {
+                ("?".into(), String::new())
+            };
             s.push_str(&format!(
-                "| `{}` | `{}` | {} |\n",
-                f.display_path, referrer, note
+                "| `{}` | {} | {} |\n",
+                f.display_path, source, note
             ));
+        }
+        for (dir, (n, sample, first)) in link_by_dir {
+            if n == 1 {
+                // 只有一条时直接显示这个链接本身，聚合反而丢信息
+                s.push_str(&format!(
+                    "| `{first}` | （符号链接本身） | 指向的目标已消失 → `{sample}` |\n"
+                ));
+            } else {
+                s.push_str(&format!(
+                    "| `{dir}` 下 **{n}** 个符号链接 | （符号链接本身） | 目标均已消失，例如 → `{sample}` |\n"
+                ));
+            }
         }
         if report.dangling.len() > 60 {
             s.push_str(&format!(

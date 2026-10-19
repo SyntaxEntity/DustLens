@@ -390,6 +390,47 @@ pub fn detect_with(
             .collect();
     }
 
+    // ---- 死符号链接（并入「失效引用」）----
+    //
+    // 符号链接本身是一个**存在的对象**；它「失效」是指**指向的目标**不在了。
+    // 交给用户的事实有两层：这是个链接 + 链接指向的东西已经没了。
+    if cfg.dangling {
+        // 用 take(budget) 而不是手工计数器：clippy 的 explicit_counter_loop 会拦
+        let budget = crate::dangling::MAX_DANGLING.saturating_sub(det.dangling.len());
+        for link in scan
+            .symlinks
+            .iter()
+            .filter(|l| !l.target_exists && !is_transient_symlink(l))
+            .take(budget)
+        {
+            let rf = refs::check(&link.path, procs, refs, home);
+            // 目标是相对路径时原样展示（相对路径本身不含家目录，无需脱敏）
+            let shown_target = if link.target.is_absolute() {
+                display_path(&link.target, home)
+            } else {
+                link.target.display().to_string()
+            };
+            det.dangling.push(Finding {
+                path: link.path.clone(),
+                display_path: display_path(&link.path, home),
+                kind: FindingKind::DanglingRef,
+                bytes: 0,
+                files: 1,
+                link: rf.strength,
+                evidence: vec![
+                    Evidence::Symlink {
+                        display_target: shown_target,
+                    },
+                    Evidence::Content {
+                        note: "符号链接指向的目标不存在".into(),
+                    },
+                ],
+                share: SharePolicy::derive(&link.path, home),
+                inaccessible: None,
+            });
+        }
+    }
+
     // ---- P0：归属（放在最后，因为它要 fork 外部命令）----
     if cfg.provenance {
         let mut prober = crate::provenance::Prober::new(home);
@@ -423,6 +464,32 @@ pub fn detect_with(
     }
 
     det
+}
+
+/// 是否属于「不该报」的临时符号链接。
+///
+/// 两类噪音，都是实跑打出来的：
+///
+/// 1. **目标不是路径**：Chromium 的 `SingletonLock` 指向 `hostname-pid`、
+///    `SingletonCookie` 指向一个整数。它们不是「路径消失」，而是进程间锁令牌。
+/// 2. **运行时锁/socket 的文件名**：`SingletonLock` / `SingletonCookie` /
+///    `SingletonSocket` / `SS` / `Socket` —— 这些本来就该在进程退出后失效。
+///
+/// 排除它们之后剩下的，才是「真的有一份数据不在原位了」。
+fn is_transient_symlink(link: &crate::scan::SymlinkEntry) -> bool {
+    if !link.target.is_absolute() {
+        return true;
+    }
+    let name = link.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    const TRANSIENT: &[&str] = &[
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+        "SingletonSocket",
+        "SS",
+        "Socket",
+    ];
+    TRANSIENT.contains(&name)
 }
 
 /// 构造一个 `Finding` 并完成引用检查。
@@ -895,6 +962,109 @@ mod tests {
     }
 
     #[test]
+    fn dead_symlink_becomes_dangling_ref_with_symlink_evidence() {
+        #[cfg(unix)]
+        {
+            let home = tmpdir("deadlink");
+            fs::write(home.join("real.txt"), b"x").unwrap();
+            std::os::unix::fs::symlink(home.join("gone-target"), home.join("dead.link")).unwrap();
+            std::os::unix::fs::symlink(home.join("real.txt"), home.join("good.link")).unwrap();
+
+            let cfg = config_for(&home);
+            let scan = crate::scan::scan(&cfg);
+            let det = detect(
+                &scan,
+                &ProcessIndex::default(),
+                &ReferenceIndex::default(),
+                &cfg,
+            );
+
+            let link_finding = det
+                .dangling
+                .iter()
+                .find(|f| f.display_path.ends_with("dead.link"))
+                .expect("死符号链接应进入失效引用分区");
+            assert_eq!(link_finding.kind, FindingKind::DanglingRef);
+            assert!(
+                link_finding
+                    .evidence
+                    .iter()
+                    .any(|e| matches!(e, Evidence::Symlink { .. })),
+                "必须带 Symlink 证据"
+            );
+            // 目标已脱敏
+            let t = link_finding
+                .evidence
+                .iter()
+                .find_map(|e| match e {
+                    Evidence::Symlink { display_target } => Some(display_target.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(t.starts_with("$HOME"), "链接目标也应脱敏，实际: {t}");
+
+            // 好链接不应进失效引用
+            assert!(!det
+                .dangling
+                .iter()
+                .any(|f| f.display_path.ends_with("good.link")));
+
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    #[test]
+    fn transient_symlinks_are_not_reported_as_dangling() {
+        #[cfg(unix)]
+        {
+            let home = tmpdir("transient");
+            fs::create_dir_all(home.join(".config/app")).unwrap();
+            // Chromium 风格：目标不是路径
+            std::os::unix::fs::symlink("fedora-1234", home.join(".config/app/SingletonLock"))
+                .unwrap();
+            // 运行时 socket：绝对但属瞬时
+            std::os::unix::fs::symlink(
+                "/tmp/whatever/SingletonSocket",
+                home.join(".config/app/SingletonSocket"),
+            )
+            .unwrap();
+            // 真正该报的
+            std::os::unix::fs::symlink(home.join("missing-data"), home.join("real-dead.link"))
+                .unwrap();
+
+            let cfg = config_for(&home);
+            let scan = crate::scan::scan(&cfg);
+            let det = detect(
+                &scan,
+                &ProcessIndex::default(),
+                &ReferenceIndex::default(),
+                &cfg,
+            );
+
+            let links: Vec<&str> = det
+                .dangling
+                .iter()
+                .filter(|f| {
+                    f.evidence
+                        .iter()
+                        .any(|e| matches!(e, Evidence::Symlink { .. }))
+                })
+                .map(|f| f.display_path.as_str())
+                .collect();
+            assert!(
+                links.iter().any(|p| p.ends_with("real-dead.link")),
+                "真正的死链接必须报出: {links:?}"
+            );
+            assert!(
+                !links.iter().any(|p| p.contains("Singleton")),
+                "运行时锁不得报出: {links:?}"
+            );
+
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    #[test]
     fn non_compliant_groups_by_app_and_never_suggests_deletion() {
         let home = tmpdir("nc");
         let mc = home.join(".minecraft");
@@ -1156,6 +1326,7 @@ mod tests {
             gaps: vec![],
             stats: ScanStats::default(),
             big_files: vec![],
+            symlinks: vec![],
         };
         let cfg = ScanConfig::new(vec![], None);
         let det = detect(
