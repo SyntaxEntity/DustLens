@@ -416,7 +416,7 @@ pub fn render_markdown(
                 .evidence
                 .iter()
                 .find_map(|e| match e {
-                    Evidence::DanglingReference { file, .. } => Some(display_path(file, home)),
+                    Evidence::DanglingReference { display_file, .. } => Some(display_file.clone()),
                     _ => None,
                 })
                 .unwrap_or_else(|| "?".into());
@@ -831,7 +831,7 @@ mod tests {
             files: 0,
             link: LinkStrength::Unclaimed,
             evidence: vec![Evidence::DanglingReference {
-                file: home.join(".config/app.json"),
+                display_file: "$HOME/.config/app.json".into(),
                 note: "配置中记录的路径已不存在".into(),
             }],
             share: SharePolicy::InHome,
@@ -882,6 +882,46 @@ mod tests {
         for bad in ["建议保留", "保留这一份", "删掉其余", "主副本"] {
             assert!(!md.contains(bad), "不得出现「{bad}」这类指定保留者的措辞");
         }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn json_has_no_real_home_path_and_no_raw_path_field() {
+        // brief v15 §3.2① 的验收断言：
+        // 1) JSON 里不得出现**本次扫描的真实家目录**（不是 "/home/" 前缀）
+        // 2) Finding.path 不参与序列化（真实路径不能进 JSON）
+        use crate::refs::build_reference_index;
+
+        let home = std::env::temp_dir().join(format!("dl_jsonleak_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        // 配置文件里引用一个**存在**的家目录内路径 → 产出 ConfigReference 证据
+        fs::create_dir_all(home.join(".config/app")).unwrap();
+        fs::create_dir_all(home.join("data")).unwrap();
+        fs::write(home.join("data/big.bin"), vec![0u8; 2048]).unwrap();
+        fs::write(
+            home.join(".config/app/settings.json"),
+            format!("{{\"dir\": \"{}/data\"}}", home.display()),
+        )
+        .unwrap();
+
+        let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
+        let scan = scan(&cfg);
+        let refs = build_reference_index(Some(&home), &cfg.excludes);
+        let det = detect(&scan, &ProcessIndex::default(), &refs, &cfg);
+        let (rep, _occ) = build(&scan, &det, &cfg, "test");
+
+        let json = render_json(&rep);
+        let real_home = home.to_string_lossy().into_owned();
+        assert!(
+            !json.contains(real_home.as_str()),
+            "JSON 不得出现本次扫描的真实家目录"
+        );
+        assert!(
+            !json.contains("\"path\""),
+            "Finding.path 不应被序列化（应只有 display_path）"
+        );
+        assert!(json.contains("$HOME"), "JSON 应使用 $HOME 字面量");
+
         let _ = fs::remove_dir_all(&home);
     }
 

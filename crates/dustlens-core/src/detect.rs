@@ -381,7 +381,7 @@ pub fn detect_with(
                 files: 0,
                 link: LinkStrength::Unclaimed,
                 evidence: vec![Evidence::DanglingReference {
-                    file: d.referrer,
+                    display_file: display_path(&d.referrer, home),
                     note: d.note,
                 }],
                 share: SharePolicy::OutsideHome, // 目标不存在，无内容可送；保守处理

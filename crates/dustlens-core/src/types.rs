@@ -71,11 +71,14 @@ pub enum Evidence {
     /// 进程打开了它的句柄
     ProcessFd { pid: u32, comm: String },
     /// 配置文件里出现了它的路径
-    ConfigReference { file: PathBuf },
-    /// 桌面项 / 自启项里出现了它的路径
-    DesktopReference { file: PathBuf },
-    /// 是符号链接（指向何处）
-    Symlink { target: PathBuf },
+    ///
+    /// 字段类型是 `String` 而**不是 `PathBuf`** —— 存进去的必须是已经脱敏的展示路径。
+    /// 这是刻意的：`Serialize` 会按字段原样写出，存裸路径就必然在 JSON 通道泄漏。
+    ConfigReference { display_file: String },
+    /// 桌面项 / 自启项里出现了它的路径（已脱敏）
+    DesktopReference { display_file: String },
+    /// 符号链接（目标已脱敏）
+    Symlink { display_target: String },
     /// 可重建产物：生成器是否还在（形式属性，不是价值判断）
     ///
     /// 「生成器还在」意味着产物可以重新生成；「生成器不在」意味着它已退化成普通数据。
@@ -107,8 +110,8 @@ pub enum Evidence {
     ///
     /// 注意：这条只陈述「指向的东西不在了」，**不构成「所以该删」**（P1 红线）。
     DanglingReference {
-        /// 哪个配置指向它
-        file: std::path::PathBuf,
+        /// 哪个配置指向它（已脱敏）
+        display_file: String,
         /// 判定依据（缺失的是文件/目录、父目录是否存在等）
         note: String,
     },
@@ -123,18 +126,18 @@ impl Evidence {
     ///
     /// `home` 用于把路径渲染成 `$HOME` 字面量 —— 报告里**不得**出现
     /// 绝对家目录路径（泄漏 OS 用户名）。`None` 表示原样输出。
-    pub fn summary(&self, home: Option<&Path>) -> String {
+    pub fn summary(&self, _home: Option<&Path>) -> String {
         match self {
             Evidence::ProcessCwd { pid, comm } => format!("进程 {comm} (PID {pid}) 的 cwd"),
             Evidence::ProcessFd { pid, comm } => format!("进程 {comm} (PID {pid}) 打开着它"),
-            Evidence::ConfigReference { file } => {
-                format!("配置 {} 提及它", display_path(file, home))
+            Evidence::ConfigReference { display_file } => {
+                format!("配置 {display_file} 提及它")
             }
-            Evidence::DesktopReference { file } => {
-                format!("桌面项/自启项 {} 提及它", display_path(file, home))
+            Evidence::DesktopReference { display_file } => {
+                format!("桌面项/自启项 {display_file} 提及它")
             }
-            Evidence::Symlink { target } => {
-                format!("符号链接 → {}", display_path(target, home))
+            Evidence::Symlink { display_target } => {
+                format!("符号链接 → {display_target}")
             }
             Evidence::Generator {
                 artifact,
@@ -166,8 +169,8 @@ impl Evidence {
                 }
                 None => format!("归属 `{manager}`：**不属于任何包**（用户手动安装或应用自建）"),
             },
-            Evidence::DanglingReference { file, note } => {
-                format!("{} 指向它，但目标不存在：{note}", display_path(file, home))
+            Evidence::DanglingReference { display_file, note } => {
+                format!("{display_file} 指向它，但目标不存在：{note}")
             }
             Evidence::Body { bytes, files } => {
                 format!("{} 个文件 · {}（{} B）", files, human_bytes(*bytes), bytes)
@@ -260,7 +263,11 @@ impl SharePolicy {
 /// 不含 `should_delete` 之类的字段 —— 这是刻意的（P1）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
-    /// 绝对路径
+    /// 绝对路径（**不序列化**）
+    ///
+    /// JSON 报告里只保留 `display_path`（`$HOME` 字面量）。
+    /// 真实路径若进了 JSON，脱敏就形同虚设 —— 消费方可以按需把 `$HOME` 展开回来。
+    #[serde(skip)]
     pub path: PathBuf,
     /// 以 `$HOME` 字面量表示的展示路径（写入报告时优先用它）
     pub display_path: String,
@@ -574,7 +581,7 @@ mod tests {
         };
         assert_eq!(in_use.strength(), Some(LinkStrength::InUse));
         let will_use = Evidence::ConfigReference {
-            file: p(&["home", "a", ".config", "x"]),
+            display_file: "$HOME/.config/x".into(),
         };
         assert_eq!(will_use.strength(), Some(LinkStrength::WillUse));
         let identity = Evidence::Body { bytes: 1, files: 1 };

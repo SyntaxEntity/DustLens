@@ -9,7 +9,7 @@
 //!
 //! 两者都没有命中 → `Unclaimed`，**并附带「无人认领 ≠ 不需要」的提示**。
 
-use crate::types::{Evidence, LinkStrength};
+use crate::types::{display_path, Evidence, LinkStrength};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -357,13 +357,15 @@ pub fn check(
                 hit = true;
             }
             if hit {
+                // 构造时就转成脱敏字符串 —— 这样无论哪个输出通道都不可能泄漏
+                let shown = display_path(&rf.path, home);
                 if is_desktop(&rf.path) {
                     will_use.push(Evidence::DesktopReference {
-                        file: rf.path.clone(),
+                        display_file: shown,
                     });
                 } else {
                     will_use.push(Evidence::ConfigReference {
-                        file: rf.path.clone(),
+                        display_file: shown,
                     });
                 }
             }
