@@ -180,7 +180,11 @@ mod tests {
         ids.dedup();
         assert_eq!(before, ids.len(), "预设 id 必须唯一");
         for p in PRESETS {
-            assert!(p.path.starts_with('/'), "预设路径必须是绝对路径: {}", p.path);
+            assert!(
+                p.path.starts_with('/'),
+                "预设路径必须是绝对路径: {}",
+                p.path
+            );
             assert!(!p.why.is_empty(), "每个预设都要说明为什么: {}", p.id);
         }
     }
@@ -234,7 +238,11 @@ mod tests {
 
     #[test]
     fn privilege_labels_are_nonempty() {
-        for pr in [Privilege::User, Privilege::UserPartial, Privilege::RootLikely] {
+        for pr in [
+            Privilege::User,
+            Privilege::UserPartial,
+            Privilege::RootLikely,
+        ] {
             assert!(!pr.label().is_empty());
         }
     }

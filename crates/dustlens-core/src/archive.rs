@@ -145,7 +145,12 @@ pub fn archive_root(home: Option<&Path>) -> Option<PathBuf> {
             return Some(PathBuf::from(x).join("dustlens").join("archive"));
         }
     }
-    home.map(|h| h.join(".local").join("share").join("dustlens").join("archive"))
+    home.map(|h| {
+        h.join(".local")
+            .join("share")
+            .join("dustlens")
+            .join("archive")
+    })
 }
 
 fn now_unix() -> u64 {
@@ -653,9 +658,13 @@ mod tests {
         let d = c.home.join("dir");
         mkfile(&d, "x/y.bin", 200);
 
-        let out =
-            create_archive(&c.store, &[a.clone(), d.clone()], Some(&c.home), Some("t".into()))
-                .unwrap();
+        let out = create_archive(
+            &c.store,
+            &[a.clone(), d.clone()],
+            Some(&c.home),
+            Some("t".into()),
+        )
+        .unwrap();
 
         assert!(!a.exists(), "源文件应已被移入归档");
         assert!(!d.exists(), "源目录应已被移入归档");
@@ -738,7 +747,12 @@ mod tests {
         restore_version(&c.store, &out.version_id).unwrap();
         assert!(a.exists());
         // 归档仍在
-        assert!(c.store.root.join(&out.version_id).join("payload/0").exists());
+        assert!(c
+            .store
+            .root
+            .join(&out.version_id)
+            .join("payload/0")
+            .exists());
 
         // 目标已存在 → 必须先删掉才能再恢复（这是「不覆盖」的体现）
         fs::remove_file(&a).unwrap();
@@ -756,7 +770,11 @@ mod tests {
         restore_version(&c.store, &out.version_id).unwrap();
 
         let e = restore_version(&c.store, &out.version_id).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "应是冲突而不是「缺失」");
+        assert_eq!(
+            e.kind(),
+            io::ErrorKind::AlreadyExists,
+            "应是冲突而不是「缺失」"
+        );
         assert!(e.to_string().contains("整批恢复已拒绝"));
     }
 
@@ -811,7 +829,8 @@ mod tests {
     #[test]
     fn archiving_missing_path_is_rejected() {
         let c = Case::new("missingpath");
-        let err = create_archive(&c.store, &[c.home.join("nope")], Some(&c.home), None).unwrap_err();
+        let err =
+            create_archive(&c.store, &[c.home.join("nope")], Some(&c.home), None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 

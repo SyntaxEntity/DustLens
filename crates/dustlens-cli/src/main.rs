@@ -338,7 +338,11 @@ fn confirm(roots: &[PathBuf], home: Option<&std::path::Path>) -> bool {
     println!("即将扫描以下位置（只读）：");
     for r in roots {
         let shown = core::display_path(r, home);
-        let tag = if shown.starts_with("$HOME") { "" } else { "   [预设/家目录外]" };
+        let tag = if shown.starts_with("$HOME") {
+            ""
+        } else {
+            "   [预设/家目录外]"
+        };
         println!("  {shown}{tag}");
     }
     println!();
@@ -358,9 +362,8 @@ fn confirm(roots: &[PathBuf], home: Option<&std::path::Path>) -> bool {
 
 fn archive_store(home: Option<&std::path::Path>) -> core::archive::Store {
     // 理论上总能推导出来（有 HOME 即可）；没有则退化为当前目录下的 .dustlens/archive
-    core::archive::Store::from_env(home).unwrap_or_else(|| {
-        core::archive::Store::at(PathBuf::from(".dustlens").join("archive"))
-    })
+    core::archive::Store::from_env(home)
+        .unwrap_or_else(|| core::archive::Store::at(PathBuf::from(".dustlens").join("archive")))
 }
 
 fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
@@ -403,10 +406,7 @@ fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
                     println!("归档区为空：{}", store.root.display());
                     return ExitCode::SUCCESS;
                 }
-                println!(
-                    "{:<22} {:<12} {:<10} 备注",
-                    "版本", "条目", "体积"
-                );
+                println!("{:<22} {:<12} {:<10} 备注", "版本", "条目", "体积");
                 println!("{}", "─".repeat(80));
                 for m in &list {
                     let bytes: u64 = m.entries.iter().map(|e| e.bytes).sum();
@@ -419,7 +419,10 @@ fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
                     );
                 }
                 println!();
-                println!("归档区占用：{}", core::human_bytes(core::archive::archive_usage(&store)));
+                println!(
+                    "归档区占用：{}",
+                    core::human_bytes(core::archive::archive_usage(&store))
+                );
                 println!("（归档区占用 ≠ 已释放空间；`discard` 之后才真正释放）");
                 ExitCode::SUCCESS
             }
@@ -447,7 +450,10 @@ fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
                     );
                 }
                 println!();
-                println!("恢复：dustlens archive restore {}   （整批，不可单条）", m.version_id);
+                println!(
+                    "恢复：dustlens archive restore {}   （整批，不可单条）",
+                    m.version_id
+                );
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -461,7 +467,12 @@ fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
                 Ok(plan) => {
                     println!("即将**整批恢复**版本 {}：", plan.version_id);
                     for s in &plan.entries {
-                        println!("  {}  ({}，{})", s.display, s.kind.label(), core::human_bytes(s.bytes));
+                        println!(
+                            "  {}  ({}，{})",
+                            s.display,
+                            s.kind.label(),
+                            core::human_bytes(s.bytes)
+                        );
                     }
                     println!();
                     println!("说明：若其中任意一个目标位置已存在内容，整批恢复会被拒绝（不会覆盖任何东西）。");
@@ -497,7 +508,10 @@ fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
             }
             match core::archive::discard_version(&store, &version) {
                 Ok(freed) => {
-                    println!("已销毁版本 {version}，释放约 {}。", core::human_bytes(freed));
+                    println!(
+                        "已销毁版本 {version}，释放约 {}。",
+                        core::human_bytes(freed)
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

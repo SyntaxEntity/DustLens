@@ -238,12 +238,15 @@ fn ingest_file(path: &Path, excludes: &[crate::types::ExcludeRule], idx: &mut Re
         return;
     }
     let Ok(md) = fs::metadata(path) else {
-        idx.skipped.push((path.to_path_buf(), "元数据不可读".into()));
+        idx.skipped
+            .push((path.to_path_buf(), "元数据不可读".into()));
         return;
     };
     if md.len() > MAX_REF_FILE_BYTES {
-        idx.skipped
-            .push((path.to_path_buf(), format!("超过 {} B 上限", MAX_REF_FILE_BYTES)));
+        idx.skipped.push((
+            path.to_path_buf(),
+            format!("超过 {} B 上限", MAX_REF_FILE_BYTES),
+        ));
         return;
     }
     let Ok(bytes) = fs::read(path) else {
@@ -263,7 +266,22 @@ fn ingest_file(path: &Path, excludes: &[crate::types::ExcludeRule], idx: &mut Re
     let tokens: HashSet<String> = text
         .split(|c: char| {
             c.is_whitespace()
-                || matches!(c, '"' | '\'' | '`' | '=' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+                || matches!(
+                    c,
+                    '"' | '\''
+                        | '`'
+                        | '='
+                        | ','
+                        | ';'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '<'
+                        | '>'
+                )
         })
         .filter(|t| t.contains('/'))
         .map(|t| t.to_string())
@@ -331,7 +349,10 @@ pub fn check(
             let mut hit = false;
             if rf.tokens.iter().any(|t| forms.iter().any(|f| f == t)) {
                 hit = true;
-            } else if forms.iter().any(|f| f.len() > 8 && rf.raw.contains(f.as_str())) {
+            } else if forms
+                .iter()
+                .any(|f| f.len() > 8 && rf.raw.contains(f.as_str()))
+            {
                 // 前缀命中：配置里可能写的是 `<目录>/<文件名>`
                 hit = true;
             }
@@ -444,7 +465,10 @@ mod tests {
         let target = p(&["srv", "t", "work"]);
         let f = check(target.as_path(), &procs, &refs, None);
         assert_eq!(f.strength, LinkStrength::InUse);
-        assert!(matches!(f.evidence[0], Evidence::ProcessCwd { pid: 42, .. }));
+        assert!(matches!(
+            f.evidence[0],
+            Evidence::ProcessCwd { pid: 42, .. }
+        ));
     }
 
     #[test]
@@ -465,12 +489,7 @@ mod tests {
     fn opening_a_file_inside_a_dir_does_not_mark_the_dir_in_use() {
         // 回归：目录里某个文件被打开 ≠ 这个目录正在被使用
         let procs = ProcessIndex {
-            procs: vec![mk_proc(
-                7,
-                "vlc",
-                Some("/"),
-                &["/srv/t/video/movie.mp4"],
-            )],
+            procs: vec![mk_proc(7, "vlc", Some("/"), &["/srv/t/video/movie.mp4"])],
             denied: 0,
         };
         let refs = ReferenceIndex::default();
@@ -526,10 +545,7 @@ mod tests {
         let home_buf = p(&["srv", "t"]);
         let home = home_buf.as_path();
         let refs = ReferenceIndex {
-            files: vec![mk_ref(
-                "/cfg/x.conf",
-                "path = /srv/t/ProjectData\n",
-            )],
+            files: vec![mk_ref("/cfg/x.conf", "path = /srv/t/ProjectData\n")],
             skipped: vec![],
         };
         let target = p(&["srv", "t", "ProjectData"]);
@@ -586,11 +602,16 @@ mod tests {
 
         let idx = build_reference_index(Some(&home), &crate::types::ExcludeRule::defaults());
         assert!(
-            !idx.files.iter().any(|f| f.path.to_string_lossy().contains(".config/gh")),
+            !idx.files
+                .iter()
+                .any(|f| f.path.to_string_lossy().contains(".config/gh")),
             "隐私目录不得被读取入索引: {:?}",
             idx.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
-        assert!(idx.files.iter().any(|f| f.path.to_string_lossy().contains(".config/real")));
+        assert!(idx
+            .files
+            .iter()
+            .any(|f| f.path.to_string_lossy().contains(".config/real")));
         let _ = fs::remove_dir_all(&home);
     }
 }
