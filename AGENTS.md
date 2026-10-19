@@ -1,6 +1,6 @@
 # AGENTS.md — DustLens 上手契约
 
-> 项目根 = `~/Projects/DustLens`（= 仓库根，已 `git init`，**尚未推送**）。
+> 项目根 = `~/Projects/DustLens`（= 仓库根，已推送至 `SyntaxEntity/DustLens`）。
 > **工作区统一规范（红线）见 `~/Projects/Atlas/prompts/PROMPT-00-workspace-norms.md` 与 `~/Projects/Atlas/CONVENTIONS.md`，本文件只补项目特有的部分。**
 
 > **⚠️ 每轮开工先读 `~/Projects/Atlas/brief.md`** —— 那是 Atlas 的当前轮次派发单，
@@ -30,7 +30,7 @@
 
 ### 1.1 建仓与可见性 ✅ 已解决（2026-10-17）
 
-- 仓库已建：`SyntaxEntity/DustLens`（**public，空仓库，未推送**）；本地已 `git init`（分支 `master`）、已装隐私审计钩子、remote 为 SSH。
+- 仓库已建：`SyntaxEntity/DustLens`（**public**，已推送，分支 `master`）；已装隐私审计钩子、remote 为 SSH、已开分支保护。
 - **真实台账的处置已由用户裁定（方案 B：不入库）**：
 
   | 文档 | 是否入库 |
@@ -48,6 +48,27 @@
 
 `DustLens-简报评估.md` §2/§3 中引用 qtadb 路径的段落**已作废**（qtadb 已于 2026-10-17 改名重组：`~/Projects/QtAdb` → `~/Projects/qtadb`，仓库在 `qtadb/QtAdb-Reforged`）。该文件头部已标注。
 `docs/DustLens-设计共识.md` 引用 qtadb 的那条是**方法论案例**，与路径无关，**不受影响**。
+
+### 1.4 🟡 待决：条目「tag 化」（用户 2026-10-20 提议）
+
+用户提议：**「体积异常」不再作为一个分区，而是变成条目的 tag / 排序依据。**
+
+**我的评估（已答复用户）**：可行，且方向与已完成的两处改造一致（`unclear` 已改成派生视图、
+死符号链接已并入失效引用）。结构上会**更整洁**：`Detection` 的 6 个分区字段收敛成
+`items: Vec<Finding>` + 2 个「非条目主体」集合，`Finding.kind` 换成 `tags: BTreeSet<Tag>`，
+并可删掉 `UnclearRef` 与两个挂空 helper（`is_undetermined` / `is_informational`）。
+
+**两条边界**：
+
+1. `NonCompliant`（主语是**应用**）与 `Duplicates`（主语是**集合**）**不能**变成条目 tag；
+   最终模型是「统一条目 + 两个非条目主体」，须在类型注释里写死「条目 = 一个路径」。
+2. 互斥约束会从类型系统移到约定，需一条测试保证「每个 tag 都有渲染分节，反之亦然」。
+
+**待用户拍板**：
+
+- **(a)** tag 仅作筛选器，列表仍按体积排序（推荐；`bytes` 才是排序键）
+- **(b)** tag 决定全局优先级（先失效引用、再位置异常、再体积）——
+  这是独立的 `priority` 概念，且**暗含价值判断**（P1 红线），需先论证是否越界
 
 ### 1.3 待补的工程文件
 
