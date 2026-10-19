@@ -28,7 +28,8 @@ pub struct Report {
     pub dangling: Vec<Finding>,
     /// 冗余副本（M4）
     pub duplicates: Vec<DupSetOut>,
-    pub unclear: Vec<Finding>,
+    /// 「说不清」：判定失败的条目（派生视图）
+    pub unclear: Vec<UnclearOut>,
     pub loose: Vec<LooseOut>,
     pub scan_gaps: Vec<ScanGapOut>,
     pub excluded: ExcludedSummary,
@@ -81,6 +82,18 @@ pub struct AppViolationOut {
     pub evidence: Vec<Evidence>,
     /// 恒为 true：规范违规不产出删除建议（见设计共识 §3.2）
     pub informational_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnclearOut {
+    pub path: String,
+    pub bytes: u64,
+    pub bytes_human: String,
+    /// 来源分区（体积异常 / 位置异常）
+    pub from: &'static str,
+    pub link_strength: crate::types::LinkStrength,
+    /// 已掌握但不足以定性的线索
+    pub hint: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,11 +154,11 @@ pub fn build(
 ) -> (Report, Vec<OccupancyRow>) {
     let home = cfg.home.as_deref();
 
+    // 注意：unclear 是 large/odd 的**派生视图**，不能重复计入已映射体积
     let mapped: u64 = det
         .large
         .iter()
         .chain(det.odd_location.iter())
-        .chain(det.unclear.iter())
         .map(|f| f.bytes)
         .sum();
     let unmapped = scan.stats.bytes_seen.saturating_sub(mapped);
@@ -224,7 +237,18 @@ pub fn build(
                     .collect(),
             })
             .collect(),
-        unclear: det.unclear.clone(),
+        unclear: det
+            .unclear
+            .iter()
+            .map(|u| UnclearOut {
+                path: u.display_path.clone(),
+                bytes: u.bytes,
+                bytes_human: human_bytes(u.bytes),
+                from: u.kind.label(),
+                link_strength: u.link,
+                hint: u.hint.clone(),
+            })
+            .collect(),
         loose: det
             .loose
             .iter()
@@ -550,19 +574,35 @@ pub fn render_markdown(
         }
     }
 
-    // ---- 说不清 ----
+    // ---- 说不清（判定失败的派生视图）----
     s.push_str("## 说不清\n\n");
     if report.unclear.is_empty() {
-        s.push_str("_本次扫描没有出现「无引用、体积可观、但无法归类」的条目。_\n\n");
+        s.push_str("_本次扫描的条目都能被确定性识别（或已被其他分区认领）。_\n\n");
     } else {
         s.push_str(
-            "> 这些条目**不是「一种脏」**，而是**判定失败**：工具无法确认它是什么。\n\
-             > 默认不进任何自动流程。你可以逐条查看内容，或交由 LLM 分析（会消耗较多 token）。\n\
-             > 注：能被**结构/魔数**确定性识别的条目已经移出本节（见各项的「这是什么」依据）。\n\n",
+            "> 这一节**不是一种「脏」**，而是**判定失败**：工具说不出它是什么。\n\
+             > 它们本身也列在「体积异常 / 位置异常」里 —— 本节只是把这些条目**再挑出来一次**，\n\
+             > 因为「说不出是什么」才是最该由你来判断的部分。\n\
+             > 灰色线索是工具已经掌握的信息，不足以定性。\n\n",
         );
-        for f in &report.unclear {
-            render_finding(&mut s, f, 3, home);
+        s.push_str("| 位置 | 体积 | 来源 | 引用 | 已掌握的线索 |\n|---|---:|---|---|---|\n");
+        for u in report.unclear.iter().take(60) {
+            s.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} |\n",
+                u.path,
+                u.bytes_human,
+                u.from,
+                u.link_strength.label(),
+                u.hint
+            ));
         }
+        if report.unclear.len() > 60 {
+            s.push_str(&format!(
+                "\n_另有 {} 条未列出（完整清单见 JSON）。_\n",
+                report.unclear.len() - 60
+            ));
+        }
+        s.push('\n');
     }
 
     // ---- 顶层散落物 ----
@@ -686,10 +726,10 @@ pub fn render_markdown(
     s.push('\n');
 
     // ---- 阈值 ----
+    // 「说不清」不再是体积门槛，而是「无法确定性识别」的派生视图，故没有阈值。
     s.push_str(&format!(
-        "> 判定门槛：体积异常 ≥ {} ｜ 说不清 ≥ {} ｜ 散落物 ≥ {}\n",
+        "> 判定门槛：体积异常 ≥ {} ｜ 散落物 ≥ {} ｜ 说不清 = 无法确定性识别的条目（无体积门槛）\n",
         human_bytes(LARGE_MIN_BYTES),
-        human_bytes(crate::detect::UNCLEAR_MIN_BYTES),
         human_bytes(crate::detect::LOOSE_MIN_BYTES),
     ));
 

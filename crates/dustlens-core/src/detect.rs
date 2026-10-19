@@ -88,8 +88,6 @@ fn which(tool: &str) -> bool {
 pub struct Thresholds {
     /// 进入「体积异常」
     pub large_bytes: u64,
-    /// 进入「说不清」
-    pub unclear_bytes: u64,
     /// 进入「顶层散落物」
     pub loose_bytes: u64,
 }
@@ -98,7 +96,6 @@ impl Default for Thresholds {
     fn default() -> Self {
         Self {
             large_bytes: LARGE_MIN_BYTES,
-            unclear_bytes: UNCLEAR_MIN_BYTES,
             loose_bytes: LOOSE_MIN_BYTES,
         }
     }
@@ -109,9 +106,6 @@ pub const LARGE_MIN_BYTES: u64 = 100 * 1024 * 1024; // 100 MiB
 
 /// 顶层散落物里值得点名的体积门槛。
 pub const LOOSE_MIN_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
-
-/// 「说不清」的最小体积门槛（再小就不值得占用用户注意力）。
-pub const UNCLEAR_MIN_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 
 /// 构建产物的目录名（出现在非项目语境即为「位置异常」）。
 const ARTIFACT_DIR_NAMES: &[&str] = &[
@@ -195,8 +189,11 @@ pub struct Detection {
     pub large: Vec<Finding>,
     /// 位置异常
     pub odd_location: Vec<Finding>,
-    /// 「说不清」分区（按体积降序）
-    pub unclear: Vec<Finding>,
+    /// 「说不清」：**判定失败**的条目（派生视图，不是独立类别）
+    ///
+    /// 语义：工具无法确定性说出「这是什么」。与体积无关 ——
+    /// 早先把它做成「50–100 MiB 的第 1 层目录」，结果被 `large` 吃光、长期为空。
+    pub unclear: Vec<UnclearRef>,
     /// 规范违规（主语是应用，按体积降序）
     pub non_compliant: Vec<AppViolation>,
     /// 顶层散落物（体积降序）
@@ -230,6 +227,22 @@ pub struct ProvenanceStats {
     pub untracked: u64,
     /// 执行失败（命令异常）次数
     pub failures: u64,
+}
+
+/// 一条「说不清」条目。
+///
+/// 它不是一种「脏」，而是**认知状态**：我们能说出它多大、在哪、有什么线索，
+/// 但说不出它是什么。
+#[derive(Debug, Clone)]
+pub struct UnclearRef {
+    pub display_path: String,
+    pub bytes: u64,
+    /// 它原本属于哪个分区（体积异常 / 位置异常）
+    pub kind: FindingKind,
+    /// 引用强度
+    pub link: LinkStrength,
+    /// 鉴定给出的线索（通常是弱的「未识别的目录」依据）
+    pub hint: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -345,8 +358,6 @@ pub fn detect_with(
     det.odd_location.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 说不清 ----
-    det.unclear = detect_unclear(scan, procs, refs, cfg, th, &det);
-    det.unclear.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 规范违规（按应用聚合）----
     det.non_compliant = detect_non_compliant(scan, procs, refs, cfg);
@@ -393,16 +404,9 @@ pub fn detect_with(
     }
 
     // ---- M5：内容鉴定 ----
-    //
-    // 放在「说不清」已经算完之后 —— 因为鉴定结果要反过来**缩小**它。
     if cfg.identify {
-        for f in det
-            .large
-            .iter_mut()
-            .chain(det.odd_location.iter_mut())
-            .chain(det.unclear.iter_mut())
-        {
-            attach_identification(f, &scan.roots);
+        for f in det.large.iter_mut().chain(det.odd_location.iter_mut()) {
+            attach_identification(f, &scan.roots, home);
             if f.evidence.iter().any(|e| {
                 matches!(
                     e,
@@ -415,18 +419,44 @@ pub fn detect_with(
                 det.identified += 1;
             }
         }
-        // 已经能确定性说清「这是什么」的条目，不该再留在「说不清」里
-        det.unclear.retain(|f| {
-            !f.evidence.iter().any(|e| {
-                matches!(
-                    e,
-                    Evidence::Identification {
-                        confident: true,
-                        ..
-                    }
-                )
+
+        // ---- 「说不清」= 判定失败的**派生视图** ----
+        //
+        // 定义：体积异常 / 位置异常里，工具**无法确定性说出「这是什么」**的条目。
+        // 与体积解耦 —— 早先按「50–100 MiB 窄带」定义，结果永远为空（见 M5 后测量）。
+        det.unclear = det
+            .large
+            .iter()
+            .chain(det.odd_location.iter())
+            // 扫描根本身不参与判定：对 $HOME 说「说不出它是什么」没有意义
+            .filter(|f| !scan.roots.iter().any(|r| r == &f.path))
+            .filter(|f| {
+                !f.evidence.iter().any(|e| {
+                    matches!(
+                        e,
+                        Evidence::Identification {
+                            confident: true,
+                            ..
+                        }
+                    )
+                })
             })
-        });
+            .map(|f| UnclearRef {
+                display_path: f.display_path.clone(),
+                bytes: f.bytes,
+                kind: f.kind,
+                link: f.link,
+                hint: f
+                    .evidence
+                    .iter()
+                    .find_map(|e| match e {
+                        Evidence::Identification { basis, .. } => Some(basis.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "没有任何鉴定线索".into()),
+            })
+            .collect();
+        det.unclear.sort_by_key(|u| std::cmp::Reverse(u.bytes));
     }
 
     // ---- 死符号链接（并入「失效引用」）----
@@ -491,12 +521,7 @@ pub fn detect_with(
                 }
             }
         };
-        for f in det
-            .large
-            .iter_mut()
-            .chain(det.odd_location.iter_mut())
-            .chain(det.unclear.iter_mut())
-        {
+        for f in det.large.iter_mut().chain(det.odd_location.iter_mut()) {
             attach(f);
         }
         det.provenance.failures = prober.failures() as u64;
@@ -539,12 +564,16 @@ fn is_transient_symlink(link: &crate::scan::SymlinkEntry) -> bool {
 ///
 /// `roots` 用来跳过**扫描根本身**：对 `$HOME` 或 `/opt` 说「这是什么」没有意义，
 /// 而且会误判（例：家目录里恰好有 `.dsh/`，就被说成「DSH 工作区」）。
-fn attach_identification(f: &mut Finding, roots: &[std::path::PathBuf]) {
+fn attach_identification(
+    f: &mut Finding,
+    roots: &[std::path::PathBuf],
+    home: Option<&std::path::Path>,
+) {
     if roots.iter().any(|r| r == &f.path) {
         return;
     }
     let id = if f.path.is_dir() {
-        crate::identify::identify_dir(&f.path)
+        crate::identify::identify_dir_with_home(&f.path, home)
     } else {
         crate::identify::identify_file(&f.path)
     };
@@ -677,69 +706,6 @@ fn detect_odd_locations(
     // 去重（同一路径可能两种规则都命中）
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup_by(|a, b| a.path == b.path);
-    out
-}
-
-/// 「说不清」：不认识、无引用、但占据可观体积的顶层目录。
-///
-/// **判定逻辑**：不属于任何已知类别（已知类别已被前面几类认领），
-/// 且体积可观。这是「判定失败」而非「一种脏」。
-fn detect_unclear(
-    scan: &RawScan,
-    procs: &ProcessIndex,
-    refs: &ReferenceIndex,
-    cfg: &ScanConfig,
-    th: Thresholds,
-    det: &Detection,
-) -> Vec<Finding> {
-    let home = cfg.home.as_deref();
-    let mut claimed: Vec<PathBuf> = Vec::new();
-    claimed.extend(det.large.iter().map(|f| f.path.clone()));
-    claimed.extend(det.odd_location.iter().map(|f| f.path.clone()));
-
-    let mut out = Vec::new();
-    let mut stats = DetectionStats::default();
-
-    for root in &scan.roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        for d in &scan.dirs {
-            if d.path.parent() != Some(root.as_path()) {
-                continue;
-            }
-            if claimed.contains(&d.path) {
-                continue;
-            }
-            if d.bytes < th.unclear_bytes {
-                continue;
-            }
-            // 已经能说清它是什么的，不算「说不清」
-            let name = d
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if ARTIFACT_DIR_NAMES.contains(&name.as_str()) && in_project_context(&d.path) {
-                continue;
-            }
-            if let Some(f) = make_finding(
-                &d.path,
-                FindingKind::Unclear,
-                d.bytes,
-                d.files,
-                procs,
-                refs,
-                home,
-                &mut stats,
-            ) {
-                // 「说不清」必须是无人认领的；有引用就说明能说清「谁在用」
-                if f.link == LinkStrength::Unclaimed {
-                    out.push(f);
-                }
-            }
-        }
-    }
     out
 }
 
@@ -1007,7 +973,7 @@ mod tests {
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
         let th = Thresholds {
-            unclear_bytes: 16, // 让体积门槛不挡住
+            large_bytes: 1, // 让它们都进入「体积异常」
             ..Thresholds::default()
         };
         let det = detect_with(
@@ -1097,8 +1063,7 @@ mod tests {
         let cfg = config_for(&home);
         let scan = crate::scan::scan(&cfg);
         let th = Thresholds {
-            large_bytes: u64::MAX, // 不让「体积异常」把它们提前认领
-            unclear_bytes: 1,
+            large_bytes: 1,
             ..Thresholds::default()
         };
         let det = detect_with(
@@ -1413,32 +1378,58 @@ mod tests {
     }
 
     #[test]
-    fn odd_and_unclear_are_mutually_exclusive_on_same_path() {
-        let home = tmpdir("excl");
-        let nm = home.join("Downloads/node_modules");
-        fs::create_dir_all(&nm).unwrap();
+    fn unclear_is_a_derived_view_over_unidentified_findings() {
+        // 新语义：untclear 不再是一条独立的「体积窄带」，而是
+        // 「体积异常 / 位置异常里无法确定性识别的条目」的派生视图。
+        let home = tmpdir("unclearview");
+        // ① 大且能识别（Minecraft 结构）→ 不应进 unclear
+        let mc = home.join("mcdata");
+        fs::create_dir_all(mc.join("saves")).unwrap();
+        fs::write(mc.join("options.txt"), b"x").unwrap();
+        // ② 大且认不出来 → 应进 unclear
+        let odd = home.join("mystery-data");
+        fs::create_dir_all(&odd).unwrap();
+        fs::write(odd.join("blob.bin"), vec![0u8; 64]).unwrap();
 
         let cfg = config_for(&home);
-        let mut scan = crate::scan::scan(&cfg);
-        // 伪造一个大体积，触发两边的门槛
-        let canon = nm.canonicalize().unwrap();
-        for d in scan.dirs.iter_mut() {
-            if d.path == canon || canon.starts_with(&d.path) {
-                d.bytes += UNCLEAR_MIN_BYTES * 2;
-            }
-        }
-        scan.dirs.sort_by_key(|b| std::cmp::Reverse(b.bytes));
-        let det = detect(
+        let scan = crate::scan::scan(&cfg);
+        let th = Thresholds {
+            large_bytes: 1, // 都算「大」
+            ..Thresholds::default()
+        };
+        let det = detect_with(
             &scan,
             &ProcessIndex::default(),
             &ReferenceIndex::default(),
             &cfg,
+            th,
         );
 
-        let in_odd = det.odd_location.iter().any(|f| f.path == canon);
-        let in_unclear = det.unclear.iter().any(|f| f.path == canon);
-        assert!(in_odd, "应进入位置异常");
-        assert!(!in_unclear, "同一条目不应同时进入「说不清」");
+        let paths: Vec<&str> = det
+            .unclear
+            .iter()
+            .map(|u| u.display_path.as_str())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("mcdata")),
+            "能确定性识别的条目不应出现在「说不清」: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("mystery-data")),
+            "认不出来的大条目必须出现在「说不清」: {paths:?}"
+        );
+        // 排序：按体积降序
+        let sizes: Vec<u64> = det.unclear.iter().map(|u| u.bytes).collect();
+        assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "应按体积降序");
+
+        let one = det
+            .unclear
+            .iter()
+            .find(|u| u.display_path.contains("mystery-data"))
+            .unwrap();
+        assert!(!one.hint.is_empty(), "必须给出「已掌握的线索」");
+        assert_eq!(one.kind.label(), "体积异常");
+
         let _ = fs::remove_dir_all(&home);
     }
 

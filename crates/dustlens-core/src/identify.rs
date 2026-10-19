@@ -123,6 +123,222 @@ const DIR_RULES: &[DirRule] = &[
     },
 ];
 
+/// 按**路径后缀**匹配的规则（相对家目录的路径）。
+///
+/// 这些回答的是「这个位置是干什么用的」——例如 `.cache/` 下的东西是缓存。
+/// 与结构规则的区别：结构规则看**内容**（有没有 Cargo.toml），这里看**位置语义**。
+struct PathRule {
+    /// 路径以其中任一后缀结尾即命中（按路径组件比较，不是字符串后缀）
+    ends_with: &'static [&'static [&'static str]],
+    what: &'static str,
+}
+
+const PATH_RULES: &[PathRule] = &[
+    // R1 XDG
+    PathRule {
+        ends_with: &[&[".config"]],
+        what: "XDG 配置目录（各应用的配置文件）",
+    },
+    PathRule {
+        ends_with: &[&[".local"]],
+        what: "XDG 数据根目录",
+    },
+    PathRule {
+        ends_with: &[&[".local", "share"]],
+        what: "XDG 应用数据目录",
+    },
+    PathRule {
+        ends_with: &[&[".local", "state"]],
+        what: "XDG 应用状态目录",
+    },
+    PathRule {
+        ends_with: &[&[".cache"]],
+        what: "XDG 缓存目录（可重建）",
+    },
+    PathRule {
+        ends_with: &[&[".var"], &[".var", "app"]],
+        what: "flatpak 应用数据（~/.var/app/<应用 id>）",
+    },
+    PathRule {
+        ends_with: &[
+            &["Documents"],
+            &["Pictures"],
+            &["Downloads"],
+            &["Videos"],
+            &["Music"],
+            &["Desktop"],
+        ],
+        what: "用户标准目录（XDG user dirs）",
+    },
+    PathRule {
+        ends_with: &[&["Games"]],
+        what: "游戏安装根目录",
+    },
+    // R2 工具链 / 包管理器
+    PathRule {
+        ends_with: &[&[".rustup"]],
+        what: "Rust 工具链根目录（rustup）",
+    },
+    PathRule {
+        ends_with: &[&[".rustup", "toolchains"]],
+        what: "已安装的 Rust 工具链",
+    },
+    PathRule {
+        ends_with: &[&[".cargo"]],
+        what: "Cargo 家目录（配置与依赖源缓存）",
+    },
+    PathRule {
+        ends_with: &[&[".cargo", "registry"]],
+        what: "Cargo 依赖源缓存（可重建）",
+    },
+    PathRule {
+        ends_with: &[&[".npm"]],
+        what: "npm 家目录（全局包与缓存）",
+    },
+    PathRule {
+        ends_with: &[&[".npm", "_cacache"]],
+        what: "npm 内容寻址缓存（可重建）",
+    },
+    PathRule {
+        ends_with: &[&[".npm", "_npx"]],
+        what: "npx 临时安装的包",
+    },
+    PathRule {
+        ends_with: &[
+            &[".nvm"],
+            &[".bun"],
+            &[".deno"],
+            &[".pyenv"],
+            &[".gradle"],
+            &[".m2"],
+        ],
+        what: "语言工具链 / 包管理器家目录",
+    },
+    // R3 Qt SDK
+    PathRule {
+        ends_with: &[&["Qt", "Docs"]],
+        what: "Qt SDK 文档",
+    },
+    PathRule {
+        ends_with: &[&["Qt", "Examples"]],
+        what: "Qt SDK 示例工程",
+    },
+    PathRule {
+        ends_with: &[&["Qt", "Tools"]],
+        what: "Qt SDK 附带工具",
+    },
+    // R5 已知应用数据
+    PathRule {
+        ends_with: &[&[".codex"]],
+        what: "Codex 应用数据",
+    },
+    PathRule {
+        ends_with: &[&[".xwechat"], &[".xwechat", "radium"]],
+        what: "微信（xwechat）应用数据",
+    },
+    PathRule {
+        ends_with: &[&[".mimocode"]],
+        what: "MiMoCode 应用数据",
+    },
+    PathRule {
+        ends_with: &[&[".steam"]],
+        what: "Steam 客户端数据",
+    },
+    PathRule {
+        ends_with: &[&[".local", "opt"]],
+        what: "用户级安装目录（~/.local/opt）",
+    },
+    PathRule {
+        ends_with: &[&["Qt"]],
+        what: "Qt SDK 根目录",
+    },
+    PathRule {
+        ends_with: &[&["xwechat_files"]],
+        what: "微信接收的文件",
+    },
+];
+
+/// 动态规则：把应用名带进结论里（`.config/QQ` → 「QQ 的应用配置目录」）。
+///
+/// 这比笼统说「未识别」有用得多 —— 用户一眼就知道这是哪个应用留下的。
+fn dynamic_rule(dir: &Path, home: Option<&Path>) -> Option<Identified> {
+    let home = home?;
+    let rel: Vec<String> = dir
+        .strip_prefix(home)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+
+    let (base, kind) = match rel.as_slice() {
+        [a, _app] if a == ".config" => (".config", "应用配置目录"),
+        [a, b, _app] if a == ".local" && b == "share" => (".local/share", "应用数据目录"),
+        [a, b, _app] if a == ".local" && b == "state" => (".local/state", "应用状态目录"),
+        [a, _app] if a == "Applications" => ("Applications", "手动安装的应用"),
+        _ => return None,
+    };
+    let app = rel.last()?;
+    // 应用名太长或含异常字符时不猜
+    if app.len() > 40 || app.contains(' ') {
+        return None;
+    }
+    Some(Identified::firm(
+        format!("{kind}：`{app}`"),
+        format!("位于 `$HOME/{base}/<应用名>/` 的标准位置"),
+    ))
+}
+
+/// 按定位语义判定（`.cache/*` 这类前缀规则放在最后，避免盖住更具体的位置）。
+fn path_rule(dir: &Path, home: Option<&Path>) -> Option<&'static str> {
+    let rel: Vec<String> = match home.and_then(|h| dir.strip_prefix(h).ok()) {
+        Some(r) => r
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect(),
+        None => return None,
+    };
+    if rel.is_empty() {
+        return None;
+    }
+    for rule in PATH_RULES {
+        for suffix in rule.ends_with {
+            if rel.len() >= suffix.len()
+                && rel[rel.len() - suffix.len()..]
+                    .iter()
+                    .zip(suffix.iter())
+                    .all(|(a, b)| a == b)
+            {
+                return Some(rule.what);
+            }
+        }
+    }
+    // R6：`.cache/` 下的任何东西都是缓存
+    if rel.first().map(|s| s == ".cache").unwrap_or(false) {
+        return Some("缓存目录（可重建）");
+    }
+    // R7：Games/ 下的任何东西都是游戏安装
+    if rel.first().map(|s| s == "Games").unwrap_or(false) {
+        return Some("游戏安装目录");
+    }
+    // R4：Qt Creator 安装（qtcreator-<版本>）与 JetBrains Toolbox 应用
+    if let Some(first) = rel.first() {
+        if first.starts_with("qtcreator-") {
+            return Some("Qt Creator 安装目录");
+        }
+    }
+    if rel.len() >= 2 && rel[0] == "Applications" && rel[1].starts_with("jetbrains-toolbox") {
+        return Some("JetBrains Toolbox 管理的应用");
+    }
+    // R3：Qt/<版本>
+    if rel.len() >= 2 && rel[0] == "Qt" {
+        let v = &rel[1];
+        if v.starts_with(|c: char| c.is_ascii_digit()) {
+            return Some("Qt SDK 安装");
+        }
+    }
+    None
+}
+
 /// 按扩展名判定的「媒体/资料集合」。
 fn ext_rule(ext: &str) -> Option<&'static str> {
     Some(match ext {
@@ -177,13 +393,18 @@ fn probe(dir: &Path, limit: usize) -> Option<Sample> {
     Some(sample)
 }
 
-/// 把「一层下探」的采样合并进主采样（只取子目录里的名字与扩展名）。
+/// 把「下探两层」的采样合并进主采样（只取名字与扩展名，不读内容）。
+///
+/// 为什么是两层：真实数据里媒体常藏在 `X/课程/视频/*.mp4`（两层），
+/// 只下探一层会漏（`Documents/A408` 就是这么漏掉的）。
 fn merge_one_level(sample: &mut Sample) {
     let subdirs = sample.subdirs.clone();
     for sub in subdirs {
         let Ok(rd) = fs::read_dir(&sub) else {
             continue;
         };
+        // 第二层：再看这些子目录里的子目录（最多 8 个）
+        let mut grandchildren: Vec<PathBuf> = Vec::new();
         for ent in rd.flatten().take(32) {
             let Some(name) = ent.file_name().to_str().map(|s| s.to_string()) else {
                 continue;
@@ -195,10 +416,36 @@ fn merge_one_level(sample: &mut Sample) {
             {
                 *sample.ext_counts.entry(ext).or_default() += 1;
             }
-            if ent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let ft = ent.file_type().ok();
+            if ft.map(|t| t.is_file()).unwrap_or(false) {
                 sample.file_count += 1;
             }
+            if ft.map(|t| t.is_dir()).unwrap_or(false) && grandchildren.len() < 8 {
+                grandchildren.push(ent.path());
+            }
             sample.names.push(name);
+        }
+        // 第二层
+        for gc in grandchildren {
+            let Ok(rd2) = fs::read_dir(&gc) else {
+                continue;
+            };
+            for ent2 in rd2.flatten().take(16) {
+                let Some(n2) = ent2.file_name().to_str().map(|s| s.to_string()) else {
+                    continue;
+                };
+                if let Some(ext) = Path::new(&n2)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                {
+                    *sample.ext_counts.entry(ext).or_default() += 1;
+                }
+                if ent2.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    sample.file_count += 1;
+                }
+                sample.names.push(n2);
+            }
         }
     }
 }
@@ -208,9 +455,26 @@ fn merge_one_level(sample: &mut Sample) {
 /// 先看直接子项；若结论不确定，再**下探一层**（最多 8 个子目录 × 32 项）——
 /// 真实数据里，媒体/资料往往在 `X/视频/`、`X/壁纸/` 这样的一层目录里。
 pub fn identify_dir(dir: &Path) -> Option<Identified> {
+    identify_dir_with_home(dir, None)
+}
+
+/// 带家目录上下文的目录鉴定（用于按定位语义判定 `.cache/`、`Qt/6.x` 等）。
+pub fn identify_dir_with_home(dir: &Path, home: Option<&Path>) -> Option<Identified> {
     let mut sample = probe(dir, MAX_DIR_ENTRIES)?;
     if sample.names.is_empty() {
         return Some(Identified::firm("空目录", "目录下没有任何子项"));
+    }
+
+    // 先看「这个位置是干什么用的」（.cache/.rustup/Qt/6.x/Games/…）
+    if let Some(what) = path_rule(dir, home) {
+        return Some(Identified::firm(what, "按目录所在位置与命名判定"));
+    }
+    if let Some(id) = dynamic_rule(dir, home) {
+        return Some(id);
+    }
+    // 项目集合：子目录里有 ≥3 个是项目（含 .git / Cargo.toml / package.json）
+    if let Some(id) = project_collection(&sample.subdirs) {
+        return Some(id);
     }
 
     if let Some(id) = classify(&sample, false) {
@@ -224,6 +488,36 @@ pub fn identify_dir(dir: &Path) -> Option<Identified> {
         return Some(id);
     }
     classify(&sample, false)
+}
+
+/// 判断一个目录是不是「一堆项目」的容器。
+///
+/// `~/Projects` 之前被判成「Rust 项目源码」（因为下探看到了 Cargo.toml），也进过「说不清」。
+/// 它真正该说的是：「这里面装了多个项目」。
+fn project_collection(subdirs: &[PathBuf]) -> Option<Identified> {
+    const MARKERS: &[&str] = &[
+        ".git",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "CMakeLists.txt",
+    ];
+    let mut hits = 0usize;
+    for sub in subdirs {
+        if MARKERS.iter().any(|m| sub.join(m).exists()) {
+            hits += 1;
+        }
+    }
+    if hits >= 3 {
+        return Some(Identified::firm(
+            "项目集合目录（内含多个项目）",
+            format!(
+                "采样的 {} 个子目录中有 {hits} 个带项目标记（.git / Cargo.toml / …）",
+                subdirs.len()
+            ),
+        ));
+    }
+    None
 }
 
 /// 对采样做分类。`deep = true` 表示采样包含下一层。
