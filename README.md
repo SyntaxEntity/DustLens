@@ -391,6 +391,7 @@ DustLens/
 |---|---|
 | [`DustLens-设计共识.md`](DustLens-设计共识.md) | **当前唯一权威**：全部设计决策 + 理由 + 变更记录 |
 | [`DustLens-思路提炼.md`](DustLens-思路提炼.md) | 方法论抽象层：六个推理模式、七个可复用信号 |
+| [`DustLens-M5后测量.md`](DustLens-M5后测量.md) | M5 之后的残差量化：LLM 还有多少事可做 |
 | [`AGENTS.md`](AGENTS.md) | 面向 AI 协作者：红线、不定项、文档地图 |
 
 ---
