@@ -290,13 +290,11 @@ fn dynamic_rule(dir: &Path, home: Option<&Path>) -> Option<Identified> {
 
 /// 按定位语义判定（`.cache/*` 这类前缀规则放在最后，避免盖住更具体的位置）。
 fn path_rule(dir: &Path, home: Option<&Path>) -> Option<&'static str> {
-    let rel: Vec<String> = match home.and_then(|h| dir.strip_prefix(h).ok()) {
-        Some(r) => r
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect(),
-        None => return None,
-    };
+    let rel: Vec<String> = home
+        .and_then(|h| dir.strip_prefix(h).ok())?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
     if rel.is_empty() {
         return None;
     }
