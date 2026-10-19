@@ -17,7 +17,7 @@
 |---|---|
 | 状态 | **M2 可用**（v0.1.0：诊断 CLI + 版本化归档，80 项测试）｜设计已冻结 |
 | 版本控制 | ✅ 已 `git init`（`master`）· 远端 `SyntaxEntity/DustLens`（SSH）· **尚未推送** |
-| 技术栈 | Rust 1.85+（MSRV 实测；workspace：`crates/dustlens-core` + `crates/dustlens-cli`），GUI 暂缓 |
+| 技术栈 | Rust 1.94+（MSRV，全工作区统一；workspace：`crates/dustlens-core` + `crates/dustlens-cli`），GUI 暂缓 |
 | 平台目标 | **先 Linux**；之后可能 Windows；**macOS 明确不做** |
 | 权威文档 | `DustLens-设计共识.md`（**当前唯一权威**） |
 
