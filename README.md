@@ -1,13 +1,13 @@
 # DustLens
 
 ![Rust](https://img.shields.io/badge/Rust-1.94%2B-blue?style=for-the-badge&logo=rust)
-![status](https://img.shields.io/badge/status-M2%20archive%20ready-blue?style=for-the-badge)
+![status](https://img.shields.io/badge/status-M3%20provenance%20ready-blue?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
 ![DeepSeek Assisted Development](https://img.shields.io/badge/DeepSeek%20Assisted-Development-brightgreen?style=for-the-badge&logo=deepseek)
 
 > 目录整洁度诊断器 —— 只声明形式属性、附上引用证据，把「需不需要」的判断权完整交给用户。
 
-> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M2 可用**（诊断 + 版本化归档）｜ 已知限制见 [已知限制](#已知限制)
+> 版本 `0.1.0`（与 `Cargo.toml` 一致）｜ 状态：**M3 可用**（诊断 + 归属 + 失效引用 + 归档）｜ 已知限制见 [已知限制](#已知限制)
 
 ---
 
@@ -68,6 +68,37 @@
 
 **它就是靠 LLM 做鉴定的工具。** 担心隐私，你有三个选择：
 把敏感目录放进排除清单、干脆不配 LLM、或者**自己部署**一个本地模型端点。
+
+### 归属：谁装的（P0）
+
+对每条结果查一次「这个路径属于哪个软件包」——这是**可查询的客观事实**，不是猜测：
+
+| 来源 | 查询方式 |
+|---|---|
+| rpm | `rpm -qf`（Fedora / RHEL / openSUSE） |
+| dpkg | `dpkg -S`（Debian / Ubuntu） |
+| pacman | `pacman -Qo`（Arch） |
+| flatpak | 按安装布局的路径推导（零进程开销） |
+
+```
+/opt/wechat       归属 rpm：包 wechat 4.1.13.5-1
+/opt/QQ           归属 rpm：不属于任何包（用户手动安装或应用自建）
+```
+
+**「不属于任何包」是一个结论，不是失败。** 它和「没查到」是两件事：
+本机没有可用包管理器时会明说「无法判断」，绝不会猜。
+
+### 失效引用（P1）
+
+配置里记录的路径，在本机**已经不存在**了 —— 这是「B 类孤儿」最容易自动化的判据：
+
+```
+$HOME/Downloads/xxx.zip   ← $HOME/.config/JetBrains/CLion2026.2/options/project.default.xml
+```
+
+**只陈述事实**：不推断「所以那个应用该删」。目标本身已经不在了，没有可归档的内容。
+
+为了不刷屏，这条判据有七道过滤器（见 `## 已知限制`）。
 
 ### 版本化归档（M2）
 
@@ -161,6 +192,10 @@ dustlens scan ~/Projects --yes
 # 纳入「重灾区」预设
 dustlens scan --presets all
 
+# 关闭某个探测（默认都开）
+dustlens scan ~/x --no-provenance     # 不 fork 包管理器
+dustlens scan ~/x --no-dangling       # 不查失效引用
+
 # 归档（可恢复，不是删除）
 dustlens archive create ~/old-stuff --note "旧项目"
 dustlens archive list
@@ -207,6 +242,8 @@ DustLens/
 │   │       ├── refs.rs            # 引用证据（/proc + 配置）
 │   │       ├── detect.rs          # 四类检测器
 │   │       ├── archive.rs         # 版本化归档（整批恢复，禁止单条）
+│   │       ├── provenance.rs      # 归属：rpm / dpkg / pacman / flatpak
+│   │       ├── dangling.rs        # 失效引用（七道噪音过滤）
 │   │       ├── presets.rs         # 重灾区预设
 │   │       └── report.rs          # JSON + Markdown 渲染
 │   └── dustlens-cli/              # 命令行（clap）
@@ -244,6 +281,12 @@ DustLens/
 - **「正在使用」是瞬时快照**：编译/索引等短命进程会让目录暂时显示为占用，几分钟后就变回「无人认领」。
   报告里会注明这一点。
 - **规范违规只覆盖家目录根下的隐藏目录**；非隐藏目录（用户自己的文件夹）刻意不判为应用的错。
+- **归属只覆盖 rpm / dpkg / pacman / flatpak**；其它包管理器（snap / nix / Gentoo / AppImage）
+  会如实报「无法判断」，**不会猜**。扫描家目录时绝大多数条目会是「不属于任何包」——
+  这很正常，家目录里的东西本来就不是包管理器装的。
+- **失效引用只判定家目录内的目标**，且只读「像配置」的文件（`.json/.toml/.ini/.conf/.desktop/…`）。
+  运行期日志与数据库（leveldb 的 `LOG`、`MANIFEST-*`）被排除在外 ——
+  否则它们里面含空格的路径会产生成批假阳性。
 - **「位置异常」判据很窄**：只认**随手区域**（`Downloads` / `Desktop` / `Templates`）与扫描根之下的构建产物。
   更深的位置视为用户有意组织，不做判定。
 - **归档不保留**：硬链接会退化成独立副本；扩展属性 / ACL / 所有权（uid/gid）不保留。
@@ -262,9 +305,11 @@ DustLens/
 | M0 | 设计冻结：定位、八条不定项、引用证据三级、隐私模型 | ✅ 完成 |
 | **M1** | **core**：BFS 扫描 + 目录级体积聚合 + 引用证据三级 + 四类检测 + 盲区披露 + JSON/Markdown | ✅ **完成**（v0.1.0） |
 | **M2** | **归档与恢复**：按版本整批恢复、冲突整批拒绝、`discard` 真正释放空间 | ✅ **完成** |
-| M3 | 规范违规的可配置白名单 / 排除清单可由 CLI 增删 | ⏳ 未开始 |
-| M4 | LLM 鉴定层（用户自配端点，默认关闭） | ⏳ 未开始 |
-| M5 | GUI | ⏳ 暂缓，待 M1–M4 有真实使用数据 |
+| M4 | 冗余副本（按内容哈希去重，用上已有的 `Duplicate` 证据） | ⏳ 未开始 |
+| M5 | 内容鉴定（魔数 + 前 4KB + 目录特征库，**不依赖 LLM**） | ⏳ 未开始 |
+| M6 | LLM 鉴定层（用户自配端点，默认关闭） | ⏳ 未开始 |
+| M7 | 可配置（`~/.config/dustlens/config.toml`）+ TUI | ⏳ 未开始 |
+| M8 | GUI | ⏳ 暂缓，待 M1–M6 有真实使用数据 |
 
 **明确不做**：`macOS` · 系统监控仪表盘 · 启动项管理 · 一键清理 · 多许可证布局
 

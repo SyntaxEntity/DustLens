@@ -10,7 +10,9 @@
 //! 入口见 [`run`]。
 
 pub mod archive;
+pub mod dangling;
 pub mod presets;
+pub mod provenance;
 pub mod detect;
 pub mod refs;
 pub mod report;
@@ -20,6 +22,7 @@ pub mod types;
 use std::path::PathBuf;
 
 pub use detect::{detect_with, Detection, DetectionStats, Thresholds};
+pub use provenance::Prober;
 pub use refs::{load_processes, ProcessIndex, ReferenceIndex};
 pub use report::{Report, OccupancyRow};
 pub use scan::{RawScan, ScanStats};

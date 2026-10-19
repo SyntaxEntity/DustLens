@@ -35,6 +35,14 @@ struct Cli {
     #[arg(short = 'y', long, global = true)]
     yes: bool,
 
+    /// 关闭「谁装的」归属探测（会 fork 包管理器，默认开启）
+    #[arg(long, global = true)]
+    no_provenance: bool,
+
+    /// 关闭「失效引用」探测（配置指向的目标不存在，默认开启）
+    #[arg(long, global = true)]
+    no_dangling: bool,
+
     /// 跟随符号链接（默认不跟随 —— 跨系统引用的常见陷阱）
     #[arg(long, global = true)]
     follow_symlinks: bool,
@@ -194,6 +202,12 @@ fn print_doctor() {
         "进程可见性    {} 个 /proc 条目可读",
         core::load_processes().procs.len()
     );
+    let pm = core::provenance::Managers::detect();
+    if pm.any() {
+        println!("归属探测      可用：{}", pm.labels().join(" / "));
+    } else {
+        println!("归属探测      ⚠️ 未找到 rpm / dpkg / pacman → 无法判断「谁装的」");
+    }
     println!("平台          {}", std::env::consts::OS);
     println!("\n本程序只读：不会删除、移动或修改被扫描的目录。");
 }
@@ -260,6 +274,8 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
     cfg.one_filesystem = !cli.cross_filesystem;
     cfg.max_depth = cli.max_depth;
     cfg.threads = cli.threads;
+    cfg.provenance = !cli.no_provenance;
+    cfg.dangling = !cli.no_dangling;
 
     eprintln!("扫描中…（只读，不会修改任何文件）");
     let t0 = std::time::Instant::now();

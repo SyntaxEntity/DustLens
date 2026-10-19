@@ -92,6 +92,26 @@ pub enum Evidence {
         /// 说明
         note: String,
     },
+    /// 归属：哪个包管理器拥有它（P0：谁装的）
+    ///
+    /// `package` 为 `None` 表示**查得到但没有归属**（不属于任何包，即用户手动装的）。
+    Provenance {
+        /// 命中的包管理器（`rpm` / `dpkg` / `pacman` / `flatpak`）
+        manager: String,
+        /// 包名（`None` = 不属于任何包）
+        package: Option<String>,
+        /// 版本（能拿到才有）
+        version: Option<String>,
+    },
+    /// 失效引用：某处配置指向了这个**不存在**的目标（P1：B 类孤儿）
+    ///
+    /// 注意：这条只陈述「指向的东西不在了」，**不构成「所以该删」**（P1 红线）。
+    DanglingReference {
+        /// 哪个配置指向它
+        file: std::path::PathBuf,
+        /// 判定依据（缺失的是文件/目录、父目录是否存在等）
+        note: String,
+    },
     /// 体积与文件数统计（不是引用，是身份信息）
     Body { bytes: u64, files: u64 },
     /// 读取该处内容得到的判定依据
@@ -100,14 +120,25 @@ pub enum Evidence {
 
 impl Evidence {
     /// 供 Markdown 渲染用的一行摘要（不含价值判断）。
-    pub fn summary(&self) -> String {
+    ///
+    /// `home` 用于把路径渲染成 `$HOME` 字面量 —— 报告里**不得**出现
+    /// 绝对家目录路径（泄漏 OS 用户名）。`None` 表示原样输出。
+    pub fn summary(&self, home: Option<&Path>) -> String {
         match self {
             Evidence::ProcessCwd { pid, comm } => format!("进程 {comm} (PID {pid}) 的 cwd"),
             Evidence::ProcessFd { pid, comm } => format!("进程 {comm} (PID {pid}) 打开着它"),
-            Evidence::ConfigReference { file } => format!("配置 {} 提及它", file.display()),
-            Evidence::DesktopReference { file } => format!("桌面项/自启项 {} 提及它", file.display()),
-            Evidence::Symlink { target } => format!("符号链接 → {}", target.display()),
-            Evidence::Duplicate { other } => format!("与 {} 内容相同", other.display()),
+            Evidence::ConfigReference { file } => {
+                format!("配置 {} 提及它", display_path(file, home))
+            }
+            Evidence::DesktopReference { file } => {
+                format!("桌面项/自启项 {} 提及它", display_path(file, home))
+            }
+            Evidence::Symlink { target } => {
+                format!("符号链接 → {}", display_path(target, home))
+            }
+            Evidence::Duplicate { other } => {
+                format!("与 {} 内容相同", display_path(other, home))
+            }
             Evidence::Generator {
                 artifact,
                 tool,
@@ -123,6 +154,23 @@ impl Evidence {
                     "项目描述已不存在 → 产物已退化为普通数据"
                 };
                 format!("可重建产物 `{artifact}`（生成器 `{tool}`）：{gen_state}")
+            }
+            Evidence::Provenance {
+                manager,
+                package,
+                version,
+            } => match package {
+                Some(pkg) => {
+                    let mut s = format!("归属 `{manager}`：包 `{pkg}`");
+                    if let Some(v) = version {
+                        s.push_str(&format!(" {v}"));
+                    }
+                    s
+                }
+                None => format!("归属 `{manager}`：**不属于任何包**（用户手动安装或应用自建）"),
+            },
+            Evidence::DanglingReference { file, note } => {
+                format!("{} 指向它，但目标不存在：{note}", display_path(file, home))
             }
             Evidence::Body { bytes, files } => {
                 format!("{} 个文件 · {}（{} B）", files, human_bytes(*bytes), bytes)
@@ -155,6 +203,8 @@ pub enum FindingKind {
     OddLocation,
     /// 判定失败（「说不清」）—— 独立分区，可选送 LLM
     Unclear,
+    /// 失效引用：某处配置指向的目标不存在（B 类孤儿）
+    DanglingRef,
 }
 
 impl FindingKind {
@@ -164,12 +214,21 @@ impl FindingKind {
             FindingKind::NonCompliant => "规范违规",
             FindingKind::OddLocation => "位置异常",
             FindingKind::Unclear => "说不清",
+            FindingKind::DanglingRef => "失效引用",
         }
     }
 
     /// 是否属于「判定失败」类（处理流程与其它三类不同）。
     pub fn is_undetermined(self) -> bool {
         matches!(self, FindingKind::Unclear)
+    }
+
+    /// 是否「仅供参考、不产出任何操作建议」。
+    ///
+    /// 失效引用的主语是**配置**而不是可删除对象 —— 目标本身已经不存在，
+    /// 没有什么东西可归档。所以它只陈述事实（P1）。
+    pub fn is_informational(self) -> bool {
+        matches!(self, FindingKind::DanglingRef)
     }
 }
 
@@ -285,6 +344,10 @@ pub struct ScanConfig {
     pub excludes: Vec<ExcludeRule>,
     /// 并行线程数；`0` = 自动
     pub threads: usize,
+    /// 是否探测「谁装的」（P0）。默认开。
+    pub provenance: bool,
+    /// 是否探测「失效引用」（P1）。默认开。
+    pub dangling: bool,
 }
 
 impl ScanConfig {
@@ -297,6 +360,8 @@ impl ScanConfig {
             max_depth: None,
             excludes: ExcludeRule::defaults(),
             threads: 0,
+            provenance: true,
+            dangling: true,
         }
     }
 }

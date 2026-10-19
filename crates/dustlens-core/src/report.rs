@@ -12,6 +12,7 @@ use crate::types::{
     display_path, human_bytes, Evidence, Finding, LinkStrength, ScanConfig,
 };
 use serde::Serialize;
+use std::path::Path;
 
 /// JSON 主数据。
 #[derive(Debug, Serialize)]
@@ -25,6 +26,8 @@ pub struct Report {
     pub large: Vec<Finding>,
     pub non_compliant: Vec<AppViolationOut>,
     pub odd_location: Vec<Finding>,
+    /// 失效引用（P1）—— 目标已不存在，属**仅供参考**，无可归档对象
+    pub dangling: Vec<Finding>,
     pub unclear: Vec<Finding>,
     pub loose: Vec<LooseOut>,
     pub scan_gaps: Vec<ScanGapOut>,
@@ -47,6 +50,14 @@ pub struct Summary {
     pub gaps: u64,
     pub excluded_entries: u64,
     pub excluded_privacy_entries: u64,
+    /// 失效引用条数
+    pub dangling: u64,
+    /// 本机可用的包管理器（用于说明「归属」能不能判）
+    pub provenance_managers: Vec<String>,
+    /// 归属判定为「属于某个包」的条目数
+    pub provenance_resolved: u64,
+    /// 归属判定为「不属于任何包」的条目数
+    pub provenance_untracked: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,11 +135,14 @@ pub fn build(
             .iter()
             .map(|r| display_path(r, home))
             .collect(),
-        home_display: cfg
-            .home
-            .as_deref()
-            .map(|h| display_path(h, None).to_string())
-            .unwrap_or_else(|| "(未知)".into()),
+        // 家目录本身也必须脱敏：早先这里写成 `display_path(h, None)`，
+        // 而 `home = None` 时该函数原样返回 —— 于是报告头部一直打印
+        // 真实的 `/home/<用户名>`，泄漏 OS 用户名。
+        home_display: if cfg.home.is_some() {
+            "$HOME".to_string()
+        } else {
+            "(未知)".to_string()
+        },
         summary: Summary {
             dirs_scanned: scan.stats.dirs_scanned,
             files_seen: scan.stats.files_seen,
@@ -143,10 +157,20 @@ pub fn build(
             gaps: scan.gaps.len() as u64,
             excluded_entries: scan.excluded.len() as u64,
             excluded_privacy_entries: privacy_count,
+            dangling: det.dangling.len() as u64,
+            provenance_managers: det
+                .provenance
+                .managers
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            provenance_resolved: det.provenance.resolved,
+            provenance_untracked: det.provenance.untracked,
         },
         large: det.large.clone(),
-        non_compliant: det.non_compliant.iter().map(to_out).collect(),
+        non_compliant: det.non_compliant.iter().map(|v| to_out(v, home)).collect(),
         odd_location: det.odd_location.clone(),
+        dangling: det.dangling.clone(),
         unclear: det.unclear.clone(),
         loose: det.loose.iter().map(|l| LooseOut {
             path: display_path(&l.path, home),
@@ -185,12 +209,12 @@ pub fn build(
     (report, occ)
 }
 
-fn to_out(v: &AppViolation) -> AppViolationOut {
+fn to_out(v: &AppViolation, home: Option<&Path>) -> AppViolationOut {
     AppViolationOut {
         app: v.app.clone(),
         bytes: v.bytes,
         bytes_human: human_bytes(v.bytes),
-        paths: v.paths.iter().map(|p| p.display().to_string()).collect(),
+        paths: v.paths.iter().map(|p| display_path(p, home)).collect(),
         xdg_suggestion: v.suggestion.clone(),
         has_desktop_entry: v.has_desktop_entry,
         link_strength: v.link,
@@ -204,6 +228,8 @@ fn notes() -> Vec<String> {
         "本报告只声明形式属性并附引用证据，不含任何『该不该删』的判断。".into(),
         "『无人认领』只说明没有进程或配置引用它，不等于你不需要它。".into(),
         "规范违规一节记录的是应用的存放行为，不是可删除对象的清单。".into(),
+        "失效引用一节只陈述『某配置指向的目标已不存在』，目标本身已无可归档的内容。".into(),
+        "归属来自本机包管理器的查询结果；『不属于任何包』不等于『来路不明』——多为用户手动安装或应用自建。".into(),
         "扫描盲区一节列出未能读取的位置；未列出即代表已读到。".into(),
     ]
 }
@@ -254,6 +280,20 @@ pub fn render_markdown(
         report.summary.will_use,
         report.summary.unclaimed
     ));
+    if report.summary.provenance_managers.is_empty() {
+        s.push_str("- 归属：本机**没有可用的包管理器** → 无法判断「谁装的」\n");
+    } else {
+        s.push_str(&format!(
+            "- 归属（{}）：**{}** 条可查到所属包 · **{}** 条不属于任何包\n",
+            report.summary.provenance_managers.join(" / "),
+            report.summary.provenance_resolved,
+            report.summary.provenance_untracked
+        ));
+    }
+    s.push_str(&format!(
+        "- 失效引用：**{}** 条（配置指向的目标已不存在）\n",
+        report.summary.dangling
+    ));
     s.push_str(&format!(
         "- 扫描盲区：**{}** 处（见[扫描盲区](#扫描盲区)）\n",
         report.summary.gaps
@@ -283,7 +323,7 @@ pub fn render_markdown(
                 if matches!(e, Evidence::Content { .. }) {
                     continue; // 建议行单独输出，避免重复
                 }
-                s.push_str(&format!("  - {}\n", e.summary()));
+                s.push_str(&format!("  - {}\n", e.summary(home)));
             }
             match v.has_desktop_entry {
                 Some(true) => s.push_str("- 桌面项：存在\n"),
@@ -297,6 +337,49 @@ pub fn render_markdown(
     // ---- 位置异常 ----
     section_findings(&mut s, "位置异常", &report.odd_location, home);
 
+    // ---- 失效引用（P1）----
+    s.push_str("## 失效引用\n\n");
+    if report.dangling.is_empty() {
+        s.push_str("_本次扫描没有发现指向已消失目标的配置引用。_\n\n");
+    } else {
+        s.push_str(
+            "> **只陈述事实**：以下配置里记录的路径，在本机**已经不存在**。\n\
+             > 这不代表「那个应用该删」—— 目标已经不在了，本节不产出任何操作建议。\n\
+             > 判定范围：仅限**家目录内**的目标；且要求**父目录存在**（否则多半是文档里的示例路径）。\n\n",
+        );
+        s.push_str("| 配置中记录的路径（已不存在） | 引用它的配置 | 依据 |\n|---|---|---|\n");
+        for f in report.dangling.iter().take(60) {
+            // 引用它的配置路径也要脱敏 —— 否则 Markdown 里会出现绝对家目录
+            let referrer = f
+                .evidence
+                .iter()
+                .find_map(|e| match e {
+                    Evidence::DanglingReference { file, .. } => Some(display_path(file, home)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "?".into());
+            let note = f
+                .evidence
+                .iter()
+                .find_map(|e| match e {
+                    Evidence::DanglingReference { note, .. } => Some(note.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            s.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                f.display_path, referrer, note
+            ));
+        }
+        if report.dangling.len() > 60 {
+            s.push_str(&format!(
+                "\n_另有 {} 条未列出（完整清单见 JSON）。_\n",
+                report.dangling.len() - 60
+            ));
+        }
+        s.push('\n');
+    }
+
     // ---- 说不清 ----
     s.push_str("## 说不清\n\n");
     if report.unclear.is_empty() {
@@ -307,7 +390,7 @@ pub fn render_markdown(
              > 默认不进任何自动流程。你可以逐条查看内容，或交由 LLM 分析（会消耗较多 token）。\n\n",
         );
         for f in &report.unclear {
-            render_finding(&mut s, f, 3);
+            render_finding(&mut s, f, 3, home);
         }
     }
 
@@ -432,18 +515,18 @@ pub fn render_markdown(
     s
 }
 
-fn section_findings(s: &mut String, title: &str, findings: &[Finding], _home: Option<&std::path::Path>) {
+fn section_findings(s: &mut String, title: &str, findings: &[Finding], home: Option<&Path>) {
     s.push_str(&format!("## {title}\n\n"));
     if findings.is_empty() {
         s.push_str("_本次扫描没有达到门槛的条目。_\n\n");
         return;
     }
     for f in findings {
-        render_finding(s, f, 3);
+        render_finding(s, f, 3, home);
     }
 }
 
-fn render_finding(s: &mut String, f: &Finding, level: usize) {
+fn render_finding(s: &mut String, f: &Finding, level: usize, home: Option<&Path>) {
     let h = "#".repeat(level);
     s.push_str(&format!(
         "{h} `{}` · {} · {} 个文件\n\n",
@@ -462,7 +545,7 @@ fn render_finding(s: &mut String, f: &Finding, level: usize) {
         s.push_str("- 隐私：位于家目录之外，送 LLM 需先获得你的同意\n");
     }
     for e in &f.evidence {
-        s.push_str(&format!("- {}\n", e.summary()));
+        s.push_str(&format!("- {}\n", e.summary(home)));
     }
     if let Some(reason) = &f.inaccessible {
         s.push_str(&format!("- ⚠️ 读取失败：{reason}\n"));
@@ -561,10 +644,21 @@ mod tests {
 
     #[test]
     fn markdown_has_no_absolute_home_path() {
-        let (_rep, md, _scan) = run("nohome");
-        // 报告里不应出现绝对家目录路径（用 $HOME 字面量代替）
+        let (_rep, md, scan) = run("nohome");
+        // 两重断言：
+        // 1) 不含通用的家目录前缀
         let abs_home_prefix = concat!("/", "home", "/");
         assert!(!md.contains(abs_home_prefix), "报告不得含绝对家目录路径");
+
+        // 2) **不含本次扫描的真实家目录字符串**。
+        //    第 2 条才是真正有效的检查 —— 历史上有三处泄漏
+        //    （报告头部 home_display、evidence.summary、规范违规的路径行）
+        //    都因为只查 `/home/` 而在临时目录测试里逃过了。
+        let home = scan.roots[0].to_string_lossy().into_owned();
+        assert!(
+            !md.contains(home.as_str()),
+            "Markdown 不得出现本次扫描的真实家目录路径"
+        );
         assert!(md.contains("$HOME") || md.contains("(未知)"));
     }
 
@@ -583,6 +677,51 @@ mod tests {
         for v in &rep.non_compliant {
             assert!(v.informational_only, "规范违规必须标记为仅供参考");
         }
+    }
+
+    #[test]
+    fn dangling_referrer_is_masked_in_markdown() {
+        // 回归：真实报告里曾出现 `/home/<user>/.config/...` 作为「引用它的配置」
+        use crate::detect::Detection;
+        use crate::types::{
+            Evidence, Finding, FindingKind, LinkStrength, SharePolicy,
+        };
+
+        let home = std::env::temp_dir().join(format!("dl_dmask_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".config")).unwrap();
+
+        let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
+        let scan = scan(&cfg);
+        let mut det = Detection::default();
+        det.dangling.push(Finding {
+            path: home.join("gone/x"),
+            display_path: "$HOME/gone/x".into(),
+            kind: FindingKind::DanglingRef,
+            bytes: 0,
+            files: 0,
+            link: LinkStrength::Unclaimed,
+            evidence: vec![Evidence::DanglingReference {
+                file: home.join(".config/app.json"),
+                note: "配置中记录的路径已不存在".into(),
+            }],
+            share: SharePolicy::InHome,
+            inaccessible: None,
+        });
+
+        let (rep, occ) = build(&scan, &det, &cfg, "test");
+        let md = render_markdown(&rep, &occ, &scan, &det, &cfg);
+
+        assert!(
+            md.contains("$HOME/.config/app.json"),
+            "引用者路径应脱敏为 $HOME 形式"
+        );
+        let abs = home.to_string_lossy().into_owned();
+        assert!(
+            !md.contains(abs.as_str()),
+            "Markdown 不得出现绝对家目录路径"
+        );
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

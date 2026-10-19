@@ -9,6 +9,7 @@
 //! 注意：`NonCompliant` **绝不**产出「建议删除」——
 //! `.minecraft` / `.cargo` / `.rustup` 全都违反 XDG 且全都正常（见设计共识 §3.2）。
 
+use crate::dangling;
 use crate::refs::{self, ProcessIndex, ReferenceIndex};
 use crate::scan::{DirTotal, LooseFile, RawScan};
 use crate::types::{
@@ -200,8 +201,25 @@ pub struct Detection {
     pub non_compliant: Vec<AppViolation>,
     /// 顶层散落物（体积降序）
     pub loose: Vec<LooseFile>,
+    /// 失效引用（P1）：某配置指向的目标已不存在
+    pub dangling: Vec<Finding>,
     /// 引用检查汇总统计
     pub stats: DetectionStats,
+    /// 归属探测（P0）统计
+    pub provenance: ProvenanceStats,
+}
+
+/// 归属探测的统计（供报告说明「这一轮问过谁、有没有问不到」）。
+#[derive(Debug, Default, Clone)]
+pub struct ProvenanceStats {
+    /// 本机可用的包管理器
+    pub managers: Vec<&'static str>,
+    /// 成功给出归属结论的条目数
+    pub resolved: u64,
+    /// 结论是「不属于任何包」
+    pub untracked: u64,
+    /// 执行失败（命令异常）次数
+    pub failures: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -322,6 +340,59 @@ pub fn detect_with(
         .cloned()
         .collect();
     det.loose.sort_by_key(|b| std::cmp::Reverse(b.bytes));
+
+    // ---- P1：失效引用 ----
+    if cfg.dangling {
+        det.dangling = dangling::find(refs, home, &scan.roots)
+            .into_iter()
+            .map(|d| Finding {
+                display_path: display_path(&d.missing, home),
+                path: d.missing,
+                kind: FindingKind::DanglingRef,
+                bytes: 0,
+                files: 0,
+                link: LinkStrength::Unclaimed,
+                evidence: vec![Evidence::DanglingReference {
+                    file: d.referrer,
+                    note: d.note,
+                }],
+                share: SharePolicy::OutsideHome, // 目标不存在，无内容可送；保守处理
+                inaccessible: None,
+            })
+            .collect();
+    }
+
+    // ---- P0：归属（放在最后，因为它要 fork 外部命令）----
+    if cfg.provenance {
+        let mut prober = crate::provenance::Prober::new(home);
+        det.provenance.managers = prober.managers().labels();
+
+        // 只把**有信息量**的归属挂到条目上：
+        // - 查到所属包 → 挂上（「这是包管理器装的，动它要小心」）
+        // - 查不到     → 只统计，不逐条挂。「不属于任何包」在扫描家目录时
+        //                几乎对所有条目都成立，逐条打印等于 63 行噪音。
+        let mut attach = |f: &mut Finding| {
+            if let Some(ev) = prober.probe(&f.path) {
+                if let Evidence::Provenance { package, .. } = &ev {
+                    if package.is_some() {
+                        det.provenance.resolved += 1;
+                        f.evidence.push(ev);
+                    } else {
+                        det.provenance.untracked += 1;
+                    }
+                }
+            }
+        };
+        for f in det
+            .large
+            .iter_mut()
+            .chain(det.odd_location.iter_mut())
+            .chain(det.unclear.iter_mut())
+        {
+            attach(f);
+        }
+        det.provenance.failures = prober.failures() as u64;
+    }
 
     det
 }
@@ -800,7 +871,7 @@ mod tests {
             .expect("应识别出 minecraft 为规范违规");
         // 关键断言：违规条目里不得含「删除」建议
         for e in &v.evidence {
-            let s = e.summary();
+            let s = e.summary(None);
             assert!(!s.contains("删除"), "规范违规不得含删除建议: {s}");
         }
         assert!(v.suggestion.contains("XDG") || v.suggestion.contains("~/.config"));
