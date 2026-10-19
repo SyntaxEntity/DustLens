@@ -321,8 +321,8 @@ pub fn scan(cfg: &ScanConfig) -> RawScan {
     }
 
     // 散落物与目录去重排序
-    loose_files.sort_by(|a, b| b.bytes.cmp(&a.bytes));
-    dirs.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    loose_files.sort_by_key(|b| std::cmp::Reverse(b.bytes));
+    dirs.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // 盲区去重（同一路径可能被多个线程记录）
     gaps.sort_by(|a, b| a.display_path.cmp(&b.display_path));
@@ -432,7 +432,7 @@ mod tests {
         let by = |p: &str| {
             nodes
                 .iter()
-                .find(|n| n.path == PathBuf::from(p))
+                .find(|n| n.path == *p)
                 .unwrap()
                 .clone()
         };

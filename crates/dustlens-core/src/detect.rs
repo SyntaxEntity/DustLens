@@ -299,19 +299,20 @@ pub fn detect_with(
             det.large.push(f);
         }
     }
-    det.large.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    det.large.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 位置异常 ----
     det.odd_location = detect_odd_locations(scan, procs, refs, cfg, th);
-    det.odd_location.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    det.odd_location.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 说不清 ----
     det.unclear = detect_unclear(scan, procs, refs, cfg, th, &det);
-    det.unclear.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    det.unclear.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 规范违规（按应用聚合）----
     det.non_compliant = detect_non_compliant(scan, procs, refs, cfg);
-    det.non_compliant.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    det.non_compliant
+        .sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 顶层散落物 ----
     det.loose = scan
@@ -320,7 +321,7 @@ pub fn detect_with(
         .filter(|l| l.bytes >= th.loose_bytes)
         .cloned()
         .collect();
-    det.loose.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    det.loose.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     det
 }
@@ -476,7 +477,7 @@ fn detect_unclear(
             if d.path.parent() != Some(root.as_path()) {
                 continue;
             }
-            if claimed.iter().any(|c| *c == d.path) {
+            if claimed.contains(&d.path) {
                 continue;
             }
             if d.bytes < th.unclear_bytes {
@@ -948,7 +949,7 @@ mod tests {
                 d.bytes += UNCLEAR_MIN_BYTES * 2;
             }
         }
-        scan.dirs.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        scan.dirs.sort_by_key(|b| std::cmp::Reverse(b.bytes));
         let det = detect(&scan, &ProcessIndex::default(), &ReferenceIndex::default(), &cfg);
 
         let in_odd = det.odd_location.iter().any(|f| f.path == canon);

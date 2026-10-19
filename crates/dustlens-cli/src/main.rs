@@ -376,8 +376,8 @@ fn run_archive(action: ArchiveAction, cli: &Cli) -> ExitCode {
                     return ExitCode::SUCCESS;
                 }
                 println!(
-                    "{:<22} {:<12} {:<10} {}",
-                    "版本", "条目", "体积", "备注"
+                    "{:<22} {:<12} {:<10} 备注",
+                    "版本", "条目", "体积"
                 );
                 println!("{}", "─".repeat(80));
                 for m in &list {

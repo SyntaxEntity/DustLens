@@ -327,7 +327,7 @@ pub fn list_versions(store: &Store) -> io::Result<Vec<Manifest>> {
             out.push(m);
         }
     }
-    out.sort_by(|a, b| b.created_at_unix.cmp(&a.created_at_unix));
+    out.sort_by_key(|b| std::cmp::Reverse(b.created_at_unix));
     Ok(out)
 }
 
@@ -732,7 +732,7 @@ mod tests {
         // 且第二次恢复报错信息是「归档内容缺失」（误导）。
         let c = Case::new("repeat");
         let a = mkfile(&c.home, "rep.bin", 32);
-        let out = create_archive(&c.store, &[a.clone()], Some(&c.home), None).unwrap();
+        let out = create_archive(&c.store, std::slice::from_ref(&a), Some(&c.home), None).unwrap();
 
         // 第一次恢复
         restore_version(&c.store, &out.version_id).unwrap();
@@ -752,7 +752,7 @@ mod tests {
     fn second_restore_without_removing_target_reports_conflict_not_missing() {
         let c = Case::new("conflictmsg");
         let a = mkfile(&c.home, "cm.bin", 8);
-        let out = create_archive(&c.store, &[a.clone()], Some(&c.home), None).unwrap();
+        let out = create_archive(&c.store, std::slice::from_ref(&a), Some(&c.home), None).unwrap();
         restore_version(&c.store, &out.version_id).unwrap();
 
         let e = restore_version(&c.store, &out.version_id).unwrap_err();
@@ -790,14 +790,21 @@ mod tests {
     fn refuses_to_archive_the_archive_itself() {
         let c = Case::new("self");
         fs::create_dir_all(&c.store.root).unwrap();
-        let err = create_archive(&c.store, &[c.store.root.clone()], Some(&c.home), None).unwrap_err();
+        let err = create_archive(
+            &c.store,
+            std::slice::from_ref(&c.store.root),
+            Some(&c.home),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn refuses_to_archive_whole_home() {
         let c = Case::new("home");
-        let err = create_archive(&c.store, &[c.home.clone()], Some(&c.home), None).unwrap_err();
+        let err = create_archive(&c.store, std::slice::from_ref(&c.home), Some(&c.home), None)
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -823,7 +830,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let out = create_archive(&c.store, &[link.clone()], Some(&c.home), None).unwrap();
+        let out =
+            create_archive(&c.store, std::slice::from_ref(&link), Some(&c.home), None).unwrap();
         let m = load_manifest(&c.store, &out.version_id).unwrap();
         assert_eq!(m.entries[0].kind, EntryKind::Symlink);
 

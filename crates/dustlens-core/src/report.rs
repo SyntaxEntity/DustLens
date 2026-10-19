@@ -179,7 +179,7 @@ pub fn build(
             files: d.files,
         })
         .collect();
-    occ.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    occ.sort_by_key(|b| std::cmp::Reverse(b.bytes));
     occ.truncate(50);
 
     (report, occ)
@@ -290,7 +290,7 @@ pub fn render_markdown(
                 Some(false) => s.push_str("- 桌面项：未找到\n"),
                 None => s.push_str("- 桌面项：无法判断\n"),
             }
-            s.push_str("\n");
+            s.push('\n');
         }
     }
 
