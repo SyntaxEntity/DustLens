@@ -1,0 +1,44 @@
+name: msrv
+
+# MSRV 钉住（裁定 D-22）
+#
+# 目的：README 徽章与 Cargo.toml 声明的是 "Rust 1.94+"。
+# 这个 workflow 在每次推送时用 1.94.0 真构建一次，让那句声明不会随依赖升级悄悄漂移。
+#
+# 为什么用 rustup 而不是 actions-rs / dtolnay 之类：
+#   版本号显式写在文件里，不依赖第三方 action 的分支别名，供应链面更小。
+#   ubuntu runner 预装 rustup，无需额外安装。
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'crates/**'
+      - '.github/workflows/msrv.yml'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  MSRV: "1.94.0"
+
+jobs:
+  msrv:
+    name: build at MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.MSRV }}
+        run: |
+          rustup toolchain install "$MSRV" --profile minimal --no-self-update
+          rustup default "$MSRV"
+          rustc --version
+
+      - name: cargo build (locked, 以 MSRV)
+        run: cargo build --workspace --locked
+
+      - name: cargo test (locked, 以 MSRV)
+        run: cargo test --workspace --locked
