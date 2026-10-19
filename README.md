@@ -315,8 +315,10 @@ DustLens/
 ├── README.md                      # 本文件：面向用户
 ├── LICENSE                        # MIT
 ├── AGENTS.md                      # 面向 AI 协作者
-├── DustLens-设计共识.md            # 设计决策（唯一权威）
-├── DustLens-思路提炼.md            # 方法论抽象层
+├── docs/
+│   ├── DustLens-设计共识.md        # 设计决策（唯一权威）
+│   ├── DustLens-思路提炼.md        # 方法论抽象层
+│   └── DustLens-M5后测量.md        # M5 后的残差量化
 └── diagnostics/                   # 报告输出（gitignore）
 ```
 
@@ -393,9 +395,9 @@ DustLens/
 
 | 文件 | 内容 |
 |---|---|
-| [`DustLens-设计共识.md`](DustLens-设计共识.md) | **当前唯一权威**：全部设计决策 + 理由 + 变更记录 |
-| [`DustLens-思路提炼.md`](DustLens-思路提炼.md) | 方法论抽象层：六个推理模式、七个可复用信号 |
-| [`DustLens-M5后测量.md`](DustLens-M5后测量.md) | M5 之后的残差量化：LLM 还有多少事可做 |
+| [`DustLens-设计共识.md`](docs/DustLens-设计共识.md) | **当前唯一权威**：全部设计决策 + 理由 + 变更记录 |
+| [`DustLens-思路提炼.md`](docs/DustLens-思路提炼.md) | 方法论抽象层：六个推理模式、七个可复用信号 |
+| [`DustLens-M5后测量.md`](docs/DustLens-M5后测量.md) | M5 之后的残差量化：LLM 还有多少事可做 |
 | [`AGENTS.md`](AGENTS.md) | 面向 AI 协作者：红线、不定项、文档地图 |
 
 ---
