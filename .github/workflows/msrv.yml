@@ -13,11 +13,13 @@ name: msrv
 #   只匹配 branches 时，**打 tag 不触发**，于是「发布的那个 commit 恰好没跑过 CI」。
 #   v0.1.0 就是这样发出去的（见 AGENT-REPORT-DustLens-20261022-02 §9）。
 #
-# ⚠️ 关于 paths 与 tag 的关系（待实测确认）：
-#   brief v19 指出：`push` 下同时写 branches + tags + paths 时，paths 对 tag 推送**同样生效**。
-#   若如此，则「只有文档变更的 commit」打 tag 不会触发本 workflow ——
-#   发版 tag 应落在含 Cargo.toml / 代码变更的提交上。
-#   本条以实测结论为准，确认后会更新此处措辞。
+# ⚠️ paths 对 tag 推送**不生效**（2026-10-22 实测，与 brief v19 §3.2 的说法相反）：
+#   同一个 tag 指向「纯文档提交」（bd373ae，只改 AGENTS.md）时，本 workflow **照样触发**；
+#   指向「改过本文件的提交」（21972a4）时也触发。两次运行的 event=push、head 都是 tag 名。
+#   结论：tag 推送会忽略 paths 过滤，因此**任何 v* tag 都会跑一遍** ——
+#   这正是我们要的效果（发布点必过 CI），不需要额外约束。
+#   反过来说：如果哪天希望 tag 也受路径限制，本文件做不到，需要改用
+#   `if: github.event_name == 'workflow_dispatch' || ...` 之类的 job 级条件。
 
 on:
   push:
