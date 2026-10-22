@@ -49,6 +49,25 @@
 `DustLens-简报评估.md` §2/§3 中引用 qtadb 路径的段落**已作废**（qtadb 已于 2026-10-17 改名重组：`~/Projects/QtAdb` → `~/Projects/qtadb`，仓库在 `qtadb/QtAdb-Reforged`）。该文件头部已标注。
 `docs/DustLens-设计共识.md` 引用 qtadb 的那条是**方法论案例**，与路径无关，**不受影响**。
 
+### 1.3 ✅ 已补的工程文件（2026-10-22 复核）
+
+两项都在 **`6d99000`（2026-10-17，项目立项）** 就做了 —— 此前本节一直写着「待补」，是记录过时。
+
+| 项 | 位置 | 复核命令 |
+|---|---|---|
+| **隐私边界** | `README.md` → `## 功能` 下的 `### 隐私边界` | `grep -n "### 隐私边界" README.md` |
+| **Vibe-Coded 披露卡片** | 顶部徽章 + 末节 `## DeepSeek Assisted Development` | 见下 |
+
+披露卡片按 `PROMPT-01-vibe-disclosure.md` 逐条核过（2026-10-22）：
+
+```bash
+grep -c "DeepSeek%20Assisted-Development" README.md   # 2  （顶部 + 末段，期望 >= 2）
+grep -c "AI%20Assisted-Development"       README.md   # 0  （无上游泛指版本）
+grep -o "logo=[a-z]*"                     README.md   # deepseek ×2（不是 robot）
+```
+
+Atlas 台账 **D-06 已于 2026-10-17 核销**，本项目侧无需再向 Atlas 报。
+
 ### 1.4 ✅ 已定：条目「tag 化」（用户 2026-10-20 提议，10-22 拍板选项 a）
 
 用户提议：**「体积异常」不再作为一个分区，而是变成条目的 tag / 排序依据。**
@@ -67,12 +86,6 @@
 **用户 2026-10-22 拍板：(a) tag 仅作筛选器**，列表仍按体积排序。
 实现见 `types::Tag` / `detect::Detection::items`；JSON schema 升到 **v2**（`items` + `tags`），
 分区数组改为 Markdown 视图且不再序列化。
-
-### 1.3 待补的工程文件
-
-- `README.md`（含**隐私边界**章节 —— 见 1.1）
-- **Vibe-Coded 披露卡片**（R11）：本项目属 vibecoding，README 需声明 **DeepSeek 辅助编写**。
-  照 `~/Projects/Atlas/prompts/PROMPT-01-vibe-disclosure.md` 执行（`qtadb` 除外，本项目**在内**）。
 
 ---
 
@@ -124,7 +137,7 @@
 |---|---|---|---|
 | 1 | 决定仓库可见性 + 复核简报中的真实台账 | 用户 / Atlas | ✅ 已完成（方案 B：两份素材文档不入库） |
 | 2 | 建仓库并配 remote（SSH） | Atlas | ✅ 已完成（空仓库，未推送） |
-| 3 | 补 `README.md`（含隐私边界）+ **vibe 披露卡片** | 我 | ⏳ |
+| 3 | 补 `README.md`（含隐私边界）+ **vibe 披露卡片** | 我 | ✅ 完成（`6d99000`，10-22 复核） |
 | 4 | **开始写 core**：JSON + Markdown 诊断报告，不做 GUI、不接 LLM | 我 | ✅ 完成（v0.1.0） |
 | 5 | **归档与恢复（M2）** | 我 | ✅ 完成 |
 | 6 | **溯源（M3）：归属 + 失效引用** | 我 | ✅ 完成 |
