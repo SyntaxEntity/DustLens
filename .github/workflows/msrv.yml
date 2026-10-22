@@ -8,10 +8,21 @@ name: msrv
 # 为什么用 rustup 而不是 actions-rs / dtolnay 之类：
 #   版本号显式写在文件里，不依赖第三方 action 的分支别名，供应链面更小。
 #   ubuntu runner 预装 rustup，无需额外安装。
+#
+# 为什么加 tags（裁定 D-30①）：
+#   只匹配 branches 时，**打 tag 不触发**，于是「发布的那个 commit 恰好没跑过 CI」。
+#   v0.1.0 就是这样发出去的（见 AGENT-REPORT-DustLens-20261022-02 §9）。
+#
+# ⚠️ 关于 paths 与 tag 的关系（待实测确认）：
+#   brief v19 指出：`push` 下同时写 branches + tags + paths 时，paths 对 tag 推送**同样生效**。
+#   若如此，则「只有文档变更的 commit」打 tag 不会触发本 workflow ——
+#   发版 tag 应落在含 Cargo.toml / 代码变更的提交上。
+#   本条以实测结论为准，确认后会更新此处措辞。
 
 on:
   push:
     branches: [master, main]
+    tags: ['v*']
     paths:
       - '**/Cargo.toml'
       - 'Cargo.lock'

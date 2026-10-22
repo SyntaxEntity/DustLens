@@ -1,0 +1,55 @@
+name: ci
+
+# 常规门禁（裁定 D-30②）
+#
+# 为什么要单独加这一条：
+#   D-28 那次 clippy 回归在本地被漏掉了 —— 当时用 `grep -c "^error"` 看输出计数，
+#   而不是看**退出码**。CI 只会 build + test 的话，clippy 回归依然会溜过去。
+#   这里把 fmt / clippy / test 三条都变成「退出码不为 0 就红」的门禁。
+#
+# 与 msrv.yml 的分工：
+#   msrv.yml —— 用 1.94.0（声明的最低版本）真构建，防止依赖悄悄抬高下限
+#   ci.yml   —— 用 stable，跑质量门禁（格式、lint、测试）
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable + clippy
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component clippy
+          rustup default stable
+          cargo clippy --version
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: cargo test
+        run: cargo test --workspace --locked
