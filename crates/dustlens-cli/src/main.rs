@@ -3,6 +3,8 @@
 //! **只读**：本程序不做任何删除、移动或写入被扫描目录的动作。
 //! 唯一写出的文件是诊断报告（Markdown + JSON），写在仓库的 `diagnostics/` 下（已 gitignore）。
 
+mod tui;
+
 use clap::{Parser, Subcommand};
 use dustlens_core as core;
 use std::io::{BufRead, IsTerminal, Write};
@@ -105,6 +107,12 @@ enum Command {
     Presets,
     /// 打印可复现的环境信息
     Doctor,
+    /// 打开只读的终端界面（扫描后浏览，界面内没有任何处置动作）
+    Tui {
+        /// 扫描根（缺省用配置，再缺省 $HOME）
+        #[arg(value_name = "PATH")]
+        roots: Vec<PathBuf>,
+    },
     /// 查看 / 生成配置文件
     Config {
         /// 把模板写到默认路径（已存在则不覆盖）
@@ -165,10 +173,50 @@ fn main() -> ExitCode {
             print_doctor();
             ExitCode::SUCCESS
         }
+        Some(Command::Tui { roots }) => run_tui(cli, roots),
         Some(Command::Config { init }) => run_config(&cli, init),
         Some(Command::Archive { action }) => run_archive(action, &cli),
         Some(Command::Scan { roots }) => run_scan(cli, roots),
         None => run_scan(cli, Vec::new()),
+    }
+}
+
+/// `dustlens tui`：扫描后进入只读界面。
+///
+/// P7：调用这个命令本身即表示同意扫描（用户明确要求「看清楚」）；
+/// 界面里不提供任何处置动作，所以不存在误操作风险。
+fn run_tui(mut cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
+    // TUI 自己会画界面，关掉扫描期的进度输出干扰
+    cli.quiet = true;
+    let (cfg, th) = match prepare_scan(&cli, cli_roots) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let diag = core::run_with(&cfg, th, false);
+    let roots: Vec<String> = cfg
+        .roots
+        .iter()
+        .map(|p| {
+            if let Some(h) = &cfg.home {
+                dustlens_core::display_path(p, Some(h))
+            } else {
+                p.display().to_string()
+            }
+        })
+        .collect();
+    let empty: Vec<dustlens_core::types::Finding> = Vec::new();
+    let items = if diag.report.items.is_empty() {
+        &empty
+    } else {
+        &diag.report.items
+    };
+    match tui::run(items, &roots) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("错误：无法启动终端界面：{e}");
+            eprintln!("（TUI 需要真实终端；脚本里请用 `dustlens scan`。）");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -310,17 +358,23 @@ fn print_doctor() {
     println!("\n本程序只读：不会删除、移动或修改被扫描的目录。");
 }
 
-fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
+/// 扫描前的全部准备：读配置、定扫描根、P7 确认、构造 ScanConfig 与门槛。
+///
+/// `scan` 与 `tui` 共用这一段，保证两条路径的行为完全一致。
+fn prepare_scan(
+    cli: &Cli,
+    cli_roots: Vec<PathBuf>,
+) -> Result<(core::ScanConfig, core::Thresholds), ExitCode> {
     let home = core::home_from_env();
 
     // ---- 配置文件（优先级：命令行 > 配置文件 > 默认值）----
-    let cpath = config_path(&cli);
+    let cpath = config_path(cli);
     let file_cfg = match core::config::load(&cpath) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("错误：{e}");
             eprintln!("（配置文件：{}）", cpath.display());
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
 
@@ -341,7 +395,7 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
             None => {
                 eprintln!("错误：未指定扫描根，且环境变量 HOME 未设置。");
                 eprintln!("请显式指定目录，例如： dustlens ~/Projects");
-                return ExitCode::FAILURE;
+                return Err(ExitCode::FAILURE);
             }
         }
     };
@@ -360,7 +414,7 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
             }
             Err(e) => {
                 eprintln!("错误：{e}");
-                return ExitCode::FAILURE;
+                return Err(ExitCode::FAILURE);
             }
         }
     }
@@ -369,7 +423,7 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             eprintln!("错误：{e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
 
@@ -378,11 +432,11 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
         if !std::io::stdin().is_terminal() {
             eprintln!("拒绝执行：当前不是交互终端，且未传 --yes。");
             eprintln!("（设计共识 P7 要求扫描前确认扫描范围。脚本场景请显式传 --yes。）");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
         if !confirm(&roots, home.as_deref()) {
             println!("已取消。未扫描任何内容。");
-            return ExitCode::SUCCESS;
+            return Err(ExitCode::SUCCESS);
         }
     }
 
@@ -391,7 +445,7 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
     if let Some(file) = &file_cfg {
         if let Err(e) = file.apply_to(&mut cfg) {
             eprintln!("错误：{e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
     if cli.follow_symlinks {
@@ -422,8 +476,6 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
         cfg.dup_min_bytes = n;
     }
 
-    eprintln!("扫描中…（只读，不会修改任何文件）");
-    let t0 = std::time::Instant::now();
     // 门槛：配置文件可改，命令行没有对应开关（改门槛的需求低频，且易误伤）
     let th = match file_cfg
         .as_ref()
@@ -432,10 +484,20 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
         Some(Ok(t)) => t,
         Some(Err(e)) => {
             eprintln!("错误：{e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
         None => core::Thresholds::default(),
     };
+    Ok((cfg, th))
+}
+
+fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
+    let (cfg, th) = match prepare_scan(&cli, cli_roots) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    eprintln!("扫描中…（只读，不会修改任何文件）");
+    let t0 = std::time::Instant::now();
     let diag = core::run_with(&cfg, th, true);
     let elapsed = t0.elapsed();
 

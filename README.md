@@ -152,6 +152,27 @@ $HOME/.dsh/profiles/node_modules 下 74 个符号链接 → 目标已移除的�
 配置类只读「像配置」的文件、要求父目录存在；符号链接类跳过非路径目标
 （Chromium 的 `SingletonLock` 指向 `hostname-pid`）与运行时锁，并在报告中按目录聚合。
 
+### 终端界面（M7）
+
+`dustlens tui` 打开一个**只读**的交互界面：左边按体积列出条目，右边给出它为什么在这里。
+
+```
+┌ DustLens ｜筛选：全部｜3/63 条｜扫描根：$HOME ────────────────────┐
+│ ▸    92.7 GiB  $HOME/Games/arknights   │ 路径  $HOME/Games/...   │
+│       79.6 GiB  $HOME/Documents/A408   │ 体积  92.7 GiB · ...    │
+│       43.1 GiB  $HOME/Projects         │ 引用  ⚪ 无人认领        │
+│                                        │ 标签  体积异常 · 说不清   │
+│                                        │ 证据                    │
+│                                        │ · 这是什么：游戏安装目录  │
+└ 按键：j/k 移动 · 1-5 筛选 · ? 帮助 · q 退出 ──────────────────┘
+```
+
+**界面里没有任何处置动作** —— 没有删除、没有移动、没有归档按钮。
+P1/P3/P6 三条都不允许：工具只负责把证据排好，判断由你完成。
+
+按键：`j/k`（或 ↑↓）移动 · `PgUp/PgDn` 翻页 · `g/G` 首尾 ·
+`1` 全部 / `2` 体积异常 / `3` 位置异常 / `4` 失效引用 / `5` 说不清 · `?` 帮助 · `q` 退出。
+
 ### 配置文件（M7）
 
 `~/.config/dustlens/config.toml`，写一次即可，不用每次敲一长串参数。
@@ -303,6 +324,7 @@ dustlens scan ~/x --no-duplicates     # 不查冗余副本（最省时间）
 dustlens scan ~/x --no-identify       # 不做内容鉴定
 
 # 配置文件（写一次，不用每次敲一长串）
+dustlens tui                          # 只读终端界面：浏览、筛选、看证据
 dustlens config --init                # 生成 ~/.config/dustlens/config.toml
 dustlens config                       # 查看实际生效的配置
 dustlens --config /path/to.toml scan  # 指定配置文件
@@ -347,6 +369,8 @@ cargo build --offline    # 依赖已缓存时可用
 DustLens/
 ├── Cargo.toml                     # workspace
 ├── crates/
+│   ├── dustlens-cli/
+│   │   ├── tui.rs                 # 只读终端界面（无任何处置动作）
 │   ├── dustlens-core/             # 核心库（无 GUI、不联网）
 │   │   └── src/
 │   │       ├── types.rs           # 数据模型（引用强度三级、Finding、ScanGap）
