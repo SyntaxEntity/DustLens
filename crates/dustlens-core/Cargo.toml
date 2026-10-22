@@ -11,3 +11,4 @@ repository.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = { workspace = true }
+toml = { workspace = true }

@@ -10,6 +10,7 @@
 //! 入口见 [`run`]。
 
 pub mod archive;
+pub mod config;
 pub mod dangling;
 pub mod detect;
 pub mod duplicates;
@@ -54,10 +55,15 @@ pub struct Diagnosis {
 ///
 /// 这是本 crate 的**唯一**入口：调用方负责（按 P7）先取得用户对扫描范围的确认。
 pub fn run(cfg: &ScanConfig, want_json: bool) -> Diagnosis {
+    run_with(cfg, Thresholds::default(), want_json)
+}
+
+/// 同 `run`，但可指定门槛（配置文件里可以改 `[thresholds]`）。
+pub fn run_with(cfg: &ScanConfig, th: Thresholds, want_json: bool) -> Diagnosis {
     let raw = scan::scan(cfg);
     let procs = refs::load_processes();
     let refs = refs::build_reference_index(cfg.home.as_deref(), &cfg.excludes);
-    let det = detect::detect(&raw, &procs, &refs, cfg);
+    let det = detect::detect_with(&raw, &procs, &refs, cfg, th);
     let (report, occupancy) = report::build(&raw, &det, cfg, VERSION);
     let markdown = report::render_markdown(&report, &occupancy, &raw, &det, cfg);
     let json = if want_json {

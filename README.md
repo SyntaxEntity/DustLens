@@ -152,6 +152,34 @@ $HOME/.dsh/profiles/node_modules 下 74 个符号链接 → 目标已移除的�
 配置类只读「像配置」的文件、要求父目录存在；符号链接类跳过非路径目标
 （Chromium 的 `SingletonLock` 指向 `hostname-pid`）与运行时锁，并在报告中按目录聚合。
 
+### 配置文件（M7）
+
+`~/.config/dustlens/config.toml`，写一次即可，不用每次敲一长串参数。
+
+```toml
+[scan]
+roots = ["$HOME", "/var/tmp"]
+presets = ["tmp", "opt"]
+
+[thresholds]
+large = "100 MiB"        # 二进制单位：KiB = 1024
+loose = "10 MiB"
+
+[features]
+provenance = true
+dangling = true
+duplicates = true
+identify = true
+dup_min_bytes = "1 MiB"
+
+[exclude]
+patterns = ["node_modules", ".git"]   # 路径片段，不是通配符
+```
+
+**优先级：命令行 > 配置文件 > 内置默认值** —— 命令行永远赢。
+
+配置文件**不能**：开启任何自动删除、关闭脱敏、或改变「只诊断不处置」的定位。
+
 ### 冗余副本（M4）
 
 内容**逐字节相同**的多份文件，按组列出：
@@ -273,6 +301,11 @@ dustlens scan ~/x --no-provenance     # 不 fork 包管理器
 dustlens scan ~/x --no-dangling       # 不查失效引用
 dustlens scan ~/x --no-duplicates     # 不查冗余副本（最省时间）
 dustlens scan ~/x --no-identify       # 不做内容鉴定
+
+# 配置文件（写一次，不用每次敲一长串）
+dustlens config --init                # 生成 ~/.config/dustlens/config.toml
+dustlens config                       # 查看实际生效的配置
+dustlens --config /path/to.toml scan  # 指定配置文件
 dustlens scan ~/x --dup-min-bytes 10485760   # 只比对 ≥10 MiB 的文件
 
 # 归档（可恢复，不是删除）
@@ -325,6 +358,7 @@ DustLens/
 │   │       ├── dangling.rs        # 失效引用（七道噪音过滤）
 │   │       ├── duplicates.rs      # 冗余副本（三级过滤 + 逐字节核对）
 │   │       ├── identify.rs        # 内容鉴定（结构 / 魔数 / 头部文本，不依赖 LLM）
+│   │       ├── config.rs          # 配置文件（TOML；命令行 > 配置 > 默认值）
 │   │       ├── presets.rs         # 重灾区预设
 │   │       └── report.rs          # JSON + Markdown 渲染
 │   └── dustlens-cli/              # 命令行（clap）

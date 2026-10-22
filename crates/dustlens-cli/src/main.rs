@@ -27,6 +27,12 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// 配置文件路径（缺省 $XDG_CONFIG_HOME/dustlens/config.toml）
+    ///
+    /// 优先级：命令行 > 配置文件 > 内置默认值。
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// 报告输出目录（缺省 ./diagnostics）
     #[arg(short, long, global = true, default_value = "diagnostics")]
     out: PathBuf,
@@ -99,6 +105,12 @@ enum Command {
     Presets,
     /// 打印可复现的环境信息
     Doctor,
+    /// 查看 / 生成配置文件
+    Config {
+        /// 把模板写到默认路径（已存在则不覆盖）
+        #[arg(long)]
+        init: bool,
+    },
     /// 归档：按版本管理，只能整批恢复
     Archive {
         #[command(subcommand)]
@@ -153,9 +165,83 @@ fn main() -> ExitCode {
             print_doctor();
             ExitCode::SUCCESS
         }
+        Some(Command::Config { init }) => run_config(&cli, init),
         Some(Command::Archive { action }) => run_archive(action, &cli),
         Some(Command::Scan { roots }) => run_scan(cli, roots),
         None => run_scan(cli, Vec::new()),
+    }
+}
+
+/// 解析实际使用的配置文件路径（命令行 > 默认位置）。
+fn config_path(cli: &Cli) -> PathBuf {
+    cli.config
+        .clone()
+        .unwrap_or_else(core::config::default_path)
+}
+
+/// `dustlens config`：查看或生成配置文件。
+fn run_config(cli: &Cli, init: bool) -> ExitCode {
+    let path = config_path(cli);
+    if init {
+        if path.exists() {
+            eprintln!("已存在，未覆盖：{}", path.display());
+            return ExitCode::FAILURE;
+        }
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("错误：无法创建目录 {}：{e}", dir.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        match std::fs::write(&path, core::config::template()) {
+            Ok(()) => {
+                println!("已写入配置模板：{}", path.display());
+                println!("（默认值全部写出来了，直接改你要改的那几行即可。）");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("错误：写入失败：{e}");
+                ExitCode::FAILURE
+            }
+        }
+    } else {
+        let home = core::home_from_env();
+        let mut cfg = core::ScanConfig::new(vec![], home.clone());
+        match core::config::load(&path) {
+            Ok(Some(file)) => {
+                if let Err(e) = file.apply_to(&mut cfg) {
+                    eprintln!("错误：{e}");
+                    return ExitCode::FAILURE;
+                }
+                if let Err(e) = file.thresholds(Default::default()) {
+                    eprintln!("错误：{e}");
+                    return ExitCode::FAILURE;
+                }
+                println!("配置文件：{}", path.display());
+                if cfg.roots.is_empty() {
+                    println!("扫描根   ：$HOME（默认）");
+                } else {
+                    println!("扫描根   ：{:?}", cfg.roots);
+                }
+                println!("归属探测 ：{}", cfg.provenance);
+                println!("失效引用 ：{}", cfg.dangling);
+                println!("冗余副本 ：{}", cfg.duplicates);
+                println!("内容鉴定 ：{}", cfg.identify);
+                println!("去重门槛 ：{} B", cfg.dup_min_bytes);
+                println!("跟随链接 ：{}", cfg.follow_symlinks);
+                println!("排除规则 ：{} 条（含内置）", cfg.excludes.len());
+                ExitCode::SUCCESS
+            }
+            Ok(None) => {
+                println!("配置文件：{}（不存在，使用内置默认值）", path.display());
+                println!("用 `dustlens config --init` 生成一份模板。");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("错误：{e}");
+                ExitCode::FAILURE
+            }
+        }
     }
 }
 
@@ -227,8 +313,29 @@ fn print_doctor() {
 fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
     let home = core::home_from_env();
 
-    // 扫描根：缺省为 $HOME（P7：默认值可接受，但必须显式确认）
-    let raw_roots: Vec<PathBuf> = if cli_roots.is_empty() {
+    // ---- 配置文件（优先级：命令行 > 配置文件 > 默认值）----
+    let cpath = config_path(&cli);
+    let file_cfg = match core::config::load(&cpath) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("错误：{e}");
+            eprintln!("（配置文件：{}）", cpath.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // 扫描根：命令行位置参数 > 配置文件 roots > $HOME（P7：默认值可接受，但必须显式确认）
+    let cfg_roots: Vec<PathBuf> = file_cfg
+        .as_ref()
+        .and_then(|c| c.scan.roots.as_ref())
+        .map(|v| v.iter().map(|r| core::config::expand_home(r)).collect())
+        .unwrap_or_default();
+
+    let raw_roots: Vec<PathBuf> = if !cli_roots.is_empty() {
+        cli_roots
+    } else if !cfg_roots.is_empty() {
+        cfg_roots
+    } else {
         match &home {
             Some(h) => vec![h.clone()],
             None => {
@@ -237,8 +344,6 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
-    } else {
-        cli_roots
     };
 
     // ---- 重灾区预设：显式启用才纳入（P7：不擅自扩大扫描范围）----
@@ -282,21 +387,56 @@ fn run_scan(cli: Cli, cli_roots: Vec<PathBuf>) -> ExitCode {
     }
 
     let mut cfg = core::ScanConfig::new(roots.clone(), home.clone());
-    cfg.follow_symlinks = cli.follow_symlinks;
-    cfg.one_filesystem = !cli.cross_filesystem;
-    cfg.max_depth = cli.max_depth;
-    cfg.threads = cli.threads;
-    cfg.provenance = !cli.no_provenance;
-    cfg.dangling = !cli.no_dangling;
-    cfg.duplicates = !cli.no_duplicates;
-    cfg.identify = !cli.no_identify;
+    // 先应用配置文件，再用命令行覆盖 —— 命令行永远赢
+    if let Some(file) = &file_cfg {
+        if let Err(e) = file.apply_to(&mut cfg) {
+            eprintln!("错误：{e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if cli.follow_symlinks {
+        cfg.follow_symlinks = true;
+    }
+    if cli.cross_filesystem {
+        cfg.one_filesystem = false;
+    }
+    if let Some(d) = cli.max_depth {
+        cfg.max_depth = Some(d);
+    }
+    if cli.threads > 0 {
+        cfg.threads = cli.threads;
+    }
+    if cli.no_provenance {
+        cfg.provenance = false;
+    }
+    if cli.no_dangling {
+        cfg.dangling = false;
+    }
+    if cli.no_duplicates {
+        cfg.duplicates = false;
+    }
+    if cli.no_identify {
+        cfg.identify = false;
+    }
     if let Some(n) = cli.dup_min_bytes {
         cfg.dup_min_bytes = n;
     }
 
     eprintln!("扫描中…（只读，不会修改任何文件）");
     let t0 = std::time::Instant::now();
-    let diag = core::run(&cfg, true);
+    // 门槛：配置文件可改，命令行没有对应开关（改门槛的需求低频，且易误伤）
+    let th = match file_cfg
+        .as_ref()
+        .map(|f| f.thresholds(core::Thresholds::default()))
+    {
+        Some(Ok(t)) => t,
+        Some(Err(e)) => {
+            eprintln!("错误：{e}");
+            return ExitCode::FAILURE;
+        }
+        None => core::Thresholds::default(),
+    };
+    let diag = core::run_with(&cfg, th, true);
     let elapsed = t0.elapsed();
 
     if cli.quiet {
