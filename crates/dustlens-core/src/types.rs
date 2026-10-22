@@ -209,43 +209,37 @@ impl Evidence {
 }
 
 /// 「判脏」的原因 —— 形式属性，不含价值判断（P1）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 条目的**形式属性标签**。
+///
+/// 刻意做成「集合」而不是「类别」：一个条目可以同时「很大」「在奇怪的位置」
+/// 「说不出是什么」。早先用互斥分区表达，导致 large 与 unclear 互相抢条目、
+/// 说不清长期为空（见 `docs/DustLens-M5后测量.md`）。
+///
+/// **标签只用于筛选与分组，不决定排序** —— 排序永远按体积（`bytes`）降序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FindingKind {
-    /// 体积异常：只对目录判定，散文件不参与排序
+pub enum Tag {
+    /// 体积异常（≥ 门槛的目录）
     Large,
-    /// 规范违规：主语是「应用」，只登记、不产出删除建议
-    NonCompliant,
-    /// 位置异常
+    /// 位置异常（构建产物出现在不该出现的地方）
     OddLocation,
-    /// 判定失败（「说不清」）—— 独立分区，可选送 LLM
-    Unclear,
-    /// 失效引用：某处配置指向的目标不存在（B 类孤儿）
+    /// 失效引用：某处配置/符号链接指向的目标不存在
     DanglingRef,
+    /// 判定失败：工具无法确定性说出「这是什么」（派生，与体积无关）
+    Unclear,
 }
 
-impl FindingKind {
+impl Tag {
+    /// 全部标签（顺序 = 报告中分节的顺序）。
+    pub const ALL: &'static [Tag] = &[Tag::Large, Tag::OddLocation, Tag::DanglingRef, Tag::Unclear];
+
     pub fn label(self) -> &'static str {
         match self {
-            FindingKind::Large => "体积异常",
-            FindingKind::NonCompliant => "规范违规",
-            FindingKind::OddLocation => "位置异常",
-            FindingKind::Unclear => "说不清",
-            FindingKind::DanglingRef => "失效引用",
+            Tag::Large => "体积异常",
+            Tag::OddLocation => "位置异常",
+            Tag::DanglingRef => "失效引用",
+            Tag::Unclear => "说不清",
         }
-    }
-
-    /// 是否属于「判定失败」类（处理流程与其它三类不同）。
-    pub fn is_undetermined(self) -> bool {
-        matches!(self, FindingKind::Unclear)
-    }
-
-    /// 是否「仅供参考、不产出任何操作建议」。
-    ///
-    /// 失效引用的主语是**配置**而不是可删除对象 —— 目标本身已经不存在，
-    /// 没有什么东西可归档。所以它只陈述事实（P1）。
-    pub fn is_informational(self) -> bool {
-        matches!(self, FindingKind::DanglingRef)
     }
 }
 
@@ -288,7 +282,8 @@ pub struct Finding {
     pub path: PathBuf,
     /// 以 `$HOME` 字面量表示的展示路径（写入报告时优先用它）
     pub display_path: String,
-    pub kind: FindingKind,
+    /// 该条目的形式属性标签（可多选）
+    pub tags: std::collections::BTreeSet<Tag>,
     /// 体积（目录为该目录下所有常规文件的合计）
     pub bytes: u64,
     /// 文件数
@@ -301,13 +296,6 @@ pub struct Finding {
     pub share: SharePolicy,
     /// 该条目自身被读取时的失败原因（若读不了）
     pub inaccessible: Option<String>,
-}
-
-impl Finding {
-    /// 该条目是否属于「说不清」分区。
-    pub fn is_unclear(&self) -> bool {
-        self.kind.is_undetermined()
-    }
 }
 
 /// 扫描盲区 —— **诚实性要求**（P8）。

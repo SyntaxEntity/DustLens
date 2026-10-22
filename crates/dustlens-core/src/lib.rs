@@ -30,8 +30,8 @@ pub use refs::{load_processes, ProcessIndex, ReferenceIndex};
 pub use report::{OccupancyRow, Report};
 pub use scan::{RawScan, ScanStats};
 pub use types::{
-    display_path, human_bytes, Evidence, ExcludeRule, Finding, FindingKind, GapKind, LinkStrength,
-    ScanConfig, ScanGap, SharePolicy,
+    display_path, human_bytes, Evidence, ExcludeRule, Finding, GapKind, LinkStrength, ScanConfig,
+    ScanGap, SharePolicy, Tag,
 };
 
 /// 当前核心版本（与 `Cargo.toml` 保持一致）。

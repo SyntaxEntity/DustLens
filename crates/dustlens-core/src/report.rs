@@ -8,6 +8,7 @@
 
 use crate::detect::{AppViolation, Detection, DetectionStats, LARGE_MIN_BYTES};
 use crate::scan::{LooseFile, RawScan};
+use crate::types::Tag;
 use crate::types::{display_path, human_bytes, Evidence, Finding, LinkStrength, ScanConfig};
 use serde::Serialize;
 use std::path::Path;
@@ -15,16 +16,26 @@ use std::path::Path;
 /// JSON 主数据。
 #[derive(Debug, Serialize)]
 pub struct Report {
+    /// JSON schema 版本。v2 起：条目统一为 `items` + `tags`，不再有分区数组。
+    pub schema_version: u32,
+    /// 统一条目表（带 tags，体积降序）——「主表」
+    pub items: Vec<Finding>,
     pub schema: &'static str,
     pub dustlens_version: &'static str,
     pub generated_at_unix: u64,
     pub roots: Vec<String>,
     pub home_display: String,
     pub summary: Summary,
+    /// Markdown 视图（不序列化）：体积异常
+    #[serde(skip)]
     pub large: Vec<Finding>,
     pub non_compliant: Vec<AppViolationOut>,
+    /// Markdown 视图（不序列化）：位置异常
+    #[serde(skip)]
     pub odd_location: Vec<Finding>,
     /// 失效引用（P1）—— 目标已不存在，属**仅供参考**，无可归档对象
+    /// Markdown 视图（不序列化）
+    #[serde(skip)]
     pub dangling: Vec<Finding>,
     /// 冗余副本（M4）
     pub duplicates: Vec<DupSetOut>,
@@ -89,8 +100,8 @@ pub struct UnclearOut {
     pub path: String,
     pub bytes: u64,
     pub bytes_human: String,
-    /// 来源分区（体积异常 / 位置异常）
-    pub from: &'static str,
+    /// 来源标签（体积异常 / 位置异常），可能是多个
+    pub from: String,
     pub link_strength: crate::types::LinkStrength,
     /// 已掌握但不足以定性的线索
     pub hint: String,
@@ -155,17 +166,14 @@ pub fn build(
     let home = cfg.home.as_deref();
 
     // 注意：unclear 是 large/odd 的**派生视图**，不能重复计入已映射体积
-    let mapped: u64 = det
-        .large
-        .iter()
-        .chain(det.odd_location.iter())
-        .map(|f| f.bytes)
-        .sum();
+    // items 是统一条目表（large/odd/dangling 已合并），直接求和即可
+    let mapped: u64 = det.items.iter().map(|f| f.bytes).sum();
     let unmapped = scan.stats.bytes_seen.saturating_sub(mapped);
 
     let privacy_count = scan.excluded.iter().filter(|e| e.privacy).count() as u64;
 
     let report = Report {
+        schema_version: 2,
         schema: "dustlens.report/v1",
         dustlens_version: version,
         generated_at_unix: now_unix(),
@@ -192,7 +200,7 @@ pub fn build(
             gaps: scan.gaps.len() as u64,
             excluded_entries: scan.excluded.len() as u64,
             excluded_privacy_entries: privacy_count,
-            dangling: det.dangling.len() as u64,
+            dangling: det.count_tag(crate::types::Tag::DanglingRef) as u64,
             // 用**真实总量**，不是明细条数 —— 明细有上限
             duplicate_sets: det.duplicate_total_sets as u64,
             duplicate_reclaimable: det.duplicate_total_reclaimable,
@@ -213,10 +221,19 @@ pub fn build(
             provenance_untracked: det.provenance.untracked,
             identified: det.identified as u64,
         },
-        large: det.large.clone(),
+        items: det.items.clone(),
         non_compliant: det.non_compliant.iter().map(|v| to_out(v, home)).collect(),
-        odd_location: det.odd_location.clone(),
-        dangling: det.dangling.clone(),
+        large: det.tagged_vec(Tag::Large).into_iter().cloned().collect(),
+        odd_location: det
+            .tagged_vec(Tag::OddLocation)
+            .into_iter()
+            .cloned()
+            .collect(),
+        dangling: det
+            .tagged_vec(Tag::DanglingRef)
+            .into_iter()
+            .cloned()
+            .collect(),
         duplicates: det
             .duplicates
             .iter()
@@ -237,16 +254,29 @@ pub fn build(
                     .collect(),
             })
             .collect(),
+        // 「说不清」现在是 Tag::Unclear —— 直接从统一条目表过滤
         unclear: det
-            .unclear
-            .iter()
-            .map(|u| UnclearOut {
-                path: u.display_path.clone(),
-                bytes: u.bytes,
-                bytes_human: human_bytes(u.bytes),
-                from: u.kind.label(),
-                link_strength: u.link,
-                hint: u.hint.clone(),
+            .tagged(Tag::Unclear)
+            .map(|f| UnclearOut {
+                path: f.display_path.clone(),
+                bytes: f.bytes,
+                bytes_human: human_bytes(f.bytes),
+                from: f
+                    .tags
+                    .iter()
+                    .filter(|t| **t != Tag::Unclear)
+                    .map(|t| t.label())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                link_strength: f.link,
+                hint: f
+                    .evidence
+                    .iter()
+                    .find_map(|e| match e {
+                        Evidence::Identification { basis, .. } => Some(basis.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "没有任何鉴定线索".into()),
             })
             .collect(),
         loose: det
@@ -911,7 +941,7 @@ mod tests {
     fn dangling_referrer_is_masked_in_markdown() {
         // 回归：真实报告里曾出现 `/home/<user>/.config/...` 作为「引用它的配置」
         use crate::detect::Detection;
-        use crate::types::{Evidence, Finding, FindingKind, LinkStrength, SharePolicy};
+        use crate::types::{Evidence, Finding, LinkStrength, SharePolicy, Tag};
 
         let home = std::env::temp_dir().join(format!("dl_dmask_{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
@@ -920,10 +950,10 @@ mod tests {
         let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
         let scan = scan(&cfg);
         let mut det = Detection::default();
-        det.dangling.push(Finding {
+        det.items.push(Finding {
             path: home.join("gone/x"),
             display_path: "$HOME/gone/x".into(),
-            kind: FindingKind::DanglingRef,
+            tags: std::iter::once(Tag::DanglingRef).collect(),
             bytes: 0,
             files: 0,
             link: LinkStrength::Unclaimed,
@@ -1018,6 +1048,68 @@ mod tests {
             "Finding.path 不应被序列化（应只有 display_path）"
         );
         assert!(json.contains("$HOME"), "JSON 应使用 $HOME 字面量");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn every_tag_has_a_rendered_section() {
+        // AGENTS §1.4 承诺的一致性测试：
+        // tag 的互斥约束从类型系统移到了约定，必须有一条测试防止「加了 tag 却没有分节」。
+        let home = std::env::temp_dir().join(format!("dl_tags_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
+        let scan = scan(&cfg);
+        let det = Detection::default();
+        let (rep, occ) = build(&scan, &det, &cfg, "test");
+        let md = render_markdown(&rep, &occ, &scan, &det, &cfg);
+
+        for tag in Tag::ALL {
+            assert!(
+                md.contains(tag.label()),
+                "每个 tag 都必须有对应的报告分节，缺：{}",
+                tag.label()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn json_items_carry_tags_and_v2_schema() {
+        let home = std::env::temp_dir().join(format!("dl_jsontag_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("big")).unwrap();
+        fs::write(home.join("big/data.bin"), vec![0u8; 2048]).unwrap();
+
+        let cfg = ScanConfig::new(vec![home.clone()], Some(home.clone()));
+        let scan = scan(&cfg);
+        // 门槛调到 1 字节，让 2 KiB 的目录进入条目表
+        let det = crate::detect::detect_with(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+            crate::detect::Thresholds {
+                large_bytes: 1,
+                ..Default::default()
+            },
+        );
+        assert!(!det.items.is_empty(), "应有条目");
+        let (rep, _occ) = build(&scan, &det, &cfg, "test");
+        let json = render_json(&rep);
+
+        assert!(json.contains("\"schema_version\": 2"), "schema 应升到 2");
+        assert!(json.contains("\"tags\""), "条目应带 tags 数组");
+        assert!(json.contains("\"items\""), "应有统一条目表");
+        // 分区**数组**不应再出现（summary 里的同名字段是计数，可以保留）
+        assert!(
+            !json.contains("\"odd_location\": ["),
+            "分区数组不应再出现在 JSON 里（改为视图）"
+        );
+        assert!(!json.contains("\"large\": ["), "large 不应作为数组出现");
 
         let _ = fs::remove_dir_all(&home);
     }

@@ -13,9 +13,7 @@ use crate::dangling;
 use crate::duplicates::{self, DuplicateSet};
 use crate::refs::{self, ProcessIndex, ReferenceIndex};
 use crate::scan::{DirTotal, LooseFile, RawScan};
-use crate::types::{
-    display_path, Evidence, Finding, FindingKind, LinkStrength, ScanConfig, SharePolicy,
-};
+use crate::types::{display_path, Evidence, Finding, LinkStrength, ScanConfig, SharePolicy, Tag};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -185,21 +183,18 @@ fn in_project_context(path: &Path) -> bool {
 /// 检测结果（含未成为 `Finding` 的聚合信息）。
 #[derive(Debug, Default)]
 pub struct Detection {
-    /// 体积异常（已按体积降序）
-    pub large: Vec<Finding>,
-    /// 位置异常
-    pub odd_location: Vec<Finding>,
-    /// 「说不清」：**判定失败**的条目（派生视图，不是独立类别）
+    /// 所有「路径条目」——**同一个路径只出现一次**，形式属性以 `tags` 表达。
     ///
-    /// 语义：工具无法确定性说出「这是什么」。与体积无关 ——
-    /// 早先把它做成「50–100 MiB 的第 1 层目录」，结果被 `large` 吃光、长期为空。
-    pub unclear: Vec<UnclearRef>,
-    /// 规范违规（主语是应用，按体积降序）
+    /// 这是本轮「tag 化」的核心：早先每个分区各一个 Vec（large / odd_location /
+    /// dangling / 派生出来的 unclear），同一条目可能在多个分区里重复出现，
+    /// 还要靠「谁先认领」的排除逻辑避免打架 —— 而体积本就是**属性**不是类别。
+    ///
+    /// 全程按体积降序（`bytes` desc），标签只用于筛选与分组，**不决定排序**。
+    pub items: Vec<Finding>,
+    /// 规范违规（主语是**应用**，不是路径，故不进 items）
     pub non_compliant: Vec<AppViolation>,
-    /// 顶层散落物（体积降序）
+    /// 顶层散落物（主语是根目录下的**散文件**）
     pub loose: Vec<LooseFile>,
-    /// 失效引用（P1）：某配置指向的目标已不存在
-    pub dangling: Vec<Finding>,
     /// 引用检查汇总统计
     pub stats: DetectionStats,
     /// 归属探测（P0）统计
@@ -216,6 +211,26 @@ pub struct Detection {
     pub identified: usize,
 }
 
+impl Detection {
+    /// 带某标签的全部条目（保持 items 的原顺序 = 体积降序）。
+    pub fn tagged(&self, tag: Tag) -> impl Iterator<Item = &Finding> {
+        self.items.iter().filter(move |f| f.tags.contains(&tag))
+    }
+
+    /// 方便测试与报告使用：收集成 Vec。
+    pub fn tagged_vec(&self, tag: Tag) -> Vec<&Finding> {
+        self.tagged(tag).collect()
+    }
+
+    pub fn count_tag(&self, tag: Tag) -> usize {
+        self.tagged(tag).count()
+    }
+
+    pub fn has_tag(&self, tag: Tag) -> bool {
+        self.tagged(tag).next().is_some()
+    }
+}
+
 /// 归属探测的统计（供报告说明「这一轮问过谁、有没有问不到」）。
 #[derive(Debug, Default, Clone)]
 pub struct ProvenanceStats {
@@ -227,22 +242,6 @@ pub struct ProvenanceStats {
     pub untracked: u64,
     /// 执行失败（命令异常）次数
     pub failures: u64,
-}
-
-/// 一条「说不清」条目。
-///
-/// 它不是一种「脏」，而是**认知状态**：我们能说出它多大、在哪、有什么线索，
-/// 但说不出它是什么。
-#[derive(Debug, Clone)]
-pub struct UnclearRef {
-    pub display_path: String,
-    pub bytes: u64,
-    /// 它原本属于哪个分区（体积异常 / 位置异常）
-    pub kind: FindingKind,
-    /// 引用强度
-    pub link: LinkStrength,
-    /// 鉴定给出的线索（通常是弱的「未识别的目录」依据）
-    pub hint: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -302,6 +301,10 @@ pub fn detect_with(
 ) -> Detection {
     let home = cfg.home.as_deref();
     let mut det = Detection::default();
+    // 先在局部构建，最后打标签合并成 items
+    let mut large: Vec<Finding> = Vec::new();
+    let mut odd: Vec<Finding>;
+    let mut dangling_findings: Vec<Finding> = Vec::new();
 
     // ---- 体积异常 ----
     //
@@ -338,7 +341,7 @@ pub fn detect_with(
             }
             let Some(f) = make_finding(
                 &d.path,
-                FindingKind::Large,
+                Tag::Large,
                 d.bytes,
                 d.files,
                 procs,
@@ -348,14 +351,14 @@ pub fn detect_with(
             ) else {
                 continue;
             };
-            det.large.push(f);
+            large.push(f);
         }
     }
-    det.large.sort_by_key(|b| std::cmp::Reverse(b.bytes));
+    large.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 位置异常 ----
-    det.odd_location = detect_odd_locations(scan, procs, refs, cfg, th);
-    det.odd_location.sort_by_key(|b| std::cmp::Reverse(b.bytes));
+    odd = detect_odd_locations(scan, procs, refs, cfg, th);
+    odd.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     // ---- 说不清 ----
 
@@ -384,12 +387,12 @@ pub fn detect_with(
 
     // ---- P1：失效引用 ----
     if cfg.dangling {
-        det.dangling = dangling::find(refs, home, &scan.roots)
+        dangling_findings = dangling::find(refs, home, &scan.roots)
             .into_iter()
             .map(|d| Finding {
                 display_path: display_path(&d.missing, home),
                 path: d.missing,
-                kind: FindingKind::DanglingRef,
+                tags: std::iter::once(Tag::DanglingRef).collect(),
                 bytes: 0,
                 files: 0,
                 link: LinkStrength::Unclaimed,
@@ -405,7 +408,7 @@ pub fn detect_with(
 
     // ---- M5：内容鉴定 ----
     if cfg.identify {
-        for f in det.large.iter_mut().chain(det.odd_location.iter_mut()) {
+        for f in large.iter_mut().chain(odd.iter_mut()) {
             attach_identification(f, &scan.roots, home);
             if f.evidence.iter().any(|e| {
                 matches!(
@@ -420,43 +423,25 @@ pub fn detect_with(
             }
         }
 
-        // ---- 「说不清」= 判定失败的**派生视图** ----
+        // ---- 「说不清」= 判定失败的**标签** ----
         //
-        // 定义：体积异常 / 位置异常里，工具**无法确定性说出「这是什么」**的条目。
-        // 与体积解耦 —— 早先按「50–100 MiB 窄带」定义，结果永远为空（见 M5 后测量）。
-        det.unclear = det
-            .large
-            .iter()
-            .chain(det.odd_location.iter())
-            // 扫描根本身不参与判定：对 $HOME 说「说不出它是什么」没有意义
-            .filter(|f| !scan.roots.iter().any(|r| r == &f.path))
-            .filter(|f| {
-                !f.evidence.iter().any(|e| {
-                    matches!(
-                        e,
-                        Evidence::Identification {
-                            confident: true,
-                            ..
-                        }
-                    )
-                })
-            })
-            .map(|f| UnclearRef {
-                display_path: f.display_path.clone(),
-                bytes: f.bytes,
-                kind: f.kind,
-                link: f.link,
-                hint: f
-                    .evidence
-                    .iter()
-                    .find_map(|e| match e {
-                        Evidence::Identification { basis, .. } => Some(basis.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "没有任何鉴定线索".into()),
-            })
-            .collect();
-        det.unclear.sort_by_key(|u| std::cmp::Reverse(u.bytes));
+        // 它就是「这条条目无法被确定性识别」，与体积无关；作为标签挂在条目上，
+        // 不再需要单独的 Vec，也不会与其它分区互斥（早先的实现因此长期为空）。
+        for f in large.iter_mut().chain(odd.iter_mut()) {
+            let is_root = scan.roots.iter().any(|r| r == &f.path);
+            let confident = f.evidence.iter().any(|e| {
+                matches!(
+                    e,
+                    Evidence::Identification {
+                        confident: true,
+                        ..
+                    }
+                )
+            });
+            if !is_root && !confident {
+                f.tags.insert(Tag::Unclear);
+            }
+        }
     }
 
     // ---- 死符号链接（并入「失效引用」）----
@@ -465,7 +450,7 @@ pub fn detect_with(
     // 交给用户的事实有两层：这是个链接 + 链接指向的东西已经没了。
     if cfg.dangling {
         // 用 take(budget) 而不是手工计数器：clippy 的 explicit_counter_loop 会拦
-        let budget = crate::dangling::MAX_DANGLING.saturating_sub(det.dangling.len());
+        let budget = crate::dangling::MAX_DANGLING.saturating_sub(dangling_findings.len());
         for link in scan
             .symlinks
             .iter()
@@ -479,10 +464,10 @@ pub fn detect_with(
             } else {
                 link.target.display().to_string()
             };
-            det.dangling.push(Finding {
+            dangling_findings.push(Finding {
                 path: link.path.clone(),
                 display_path: display_path(&link.path, home),
-                kind: FindingKind::DanglingRef,
+                tags: std::iter::once(Tag::DanglingRef).collect(),
                 bytes: 0,
                 files: 1,
                 link: rf.strength,
@@ -521,11 +506,40 @@ pub fn detect_with(
                 }
             }
         };
-        for f in det.large.iter_mut().chain(det.odd_location.iter_mut()) {
+        for f in large.iter_mut().chain(odd.iter_mut()) {
             attach(f);
         }
         det.provenance.failures = prober.failures() as u64;
     }
+
+    // ---- 合并成统一条目表 ----
+    //
+    // 同一路径若在多个来源里出现（理论上 large 与 odd 可能同时命中），
+    // 合并成一条并取并集标签，避免报告里出现两个一模一样的路径。
+    let all = large
+        .into_iter()
+        .chain(odd)
+        .chain(dangling_findings)
+        .collect::<Vec<_>>();
+    let mut merged: std::collections::BTreeMap<PathBuf, Finding> =
+        std::collections::BTreeMap::new();
+    for f in all {
+        match merged.get_mut(&f.path) {
+            Some(existing) => {
+                existing.tags.extend(f.tags);
+                if f.bytes > existing.bytes {
+                    existing.bytes = f.bytes;
+                    existing.files = f.files;
+                }
+                existing.evidence.extend(f.evidence);
+            }
+            None => {
+                merged.insert(f.path.clone(), f);
+            }
+        }
+    }
+    det.items = merged.into_values().collect();
+    det.items.sort_by_key(|f| std::cmp::Reverse(f.bytes));
 
     det
 }
@@ -589,7 +603,7 @@ fn attach_identification(
 #[allow(clippy::too_many_arguments)]
 fn make_finding(
     path: &Path,
-    kind: FindingKind,
+    tag: Tag,
     bytes: u64,
     files: u64,
     procs: &ProcessIndex,
@@ -611,7 +625,7 @@ fn make_finding(
     Some(Finding {
         path: path.to_path_buf(),
         display_path: display_path(path, home),
-        kind,
+        tags: std::iter::once(tag).collect(),
         bytes,
         files,
         link: rf.strength,
@@ -681,7 +695,7 @@ fn detect_odd_locations(
         }
         if let Some(f) = make_finding(
             &d.path,
-            FindingKind::OddLocation,
+            Tag::OddLocation,
             d.bytes,
             d.files,
             procs,
@@ -899,7 +913,7 @@ mod tests {
             &cfg,
         );
         assert!(
-            !det.odd_location
+            !det.tagged_vec(Tag::OddLocation)
                 .iter()
                 .any(|f| f.path == t.canonicalize().unwrap()),
             "项目内的 target/ 不应被判为位置异常"
@@ -924,7 +938,7 @@ mod tests {
             &cfg,
         );
         assert!(
-            det.odd_location
+            det.tagged_vec(Tag::OddLocation)
                 .iter()
                 .any(|f| f.path.file_name().unwrap() == "node_modules"),
             "随手区域（Downloads）下的 node_modules 应被判为位置异常"
@@ -953,9 +967,12 @@ mod tests {
             &cfg,
         );
         assert!(
-            det.odd_location.is_empty(),
+            det.tagged_vec(Tag::OddLocation).is_empty(),
             "深层产物不应被判为位置异常，实际: {:?}",
-            det.odd_location.iter().map(|f| &f.path).collect::<Vec<_>>()
+            det.tagged_vec(Tag::OddLocation)
+                .iter()
+                .map(|f| &f.path)
+                .collect::<Vec<_>>()
         );
         let _ = fs::remove_dir_all(&home);
     }
@@ -983,7 +1000,11 @@ mod tests {
             &cfg,
             th,
         );
-        let offenders: Vec<&PathBuf> = det.odd_location.iter().map(|f| &f.path).collect();
+        let offenders: Vec<&PathBuf> = det
+            .tagged_vec(Tag::OddLocation)
+            .iter()
+            .map(|f| &f.path)
+            .collect();
         assert!(
             offenders.is_empty(),
             "用户自己的大目录不得被判为位置异常，实际: {offenders:?}"
@@ -1010,11 +1031,11 @@ mod tests {
             );
 
             let link_finding = det
-                .dangling
-                .iter()
+                .tagged_vec(Tag::DanglingRef)
+                .into_iter()
                 .find(|f| f.display_path.ends_with("dead.link"))
                 .expect("死符号链接应进入失效引用分区");
-            assert_eq!(link_finding.kind, FindingKind::DanglingRef);
+            assert!(link_finding.tags.contains(&Tag::DanglingRef));
             assert!(
                 link_finding
                     .evidence
@@ -1035,8 +1056,8 @@ mod tests {
 
             // 好链接不应进失效引用
             assert!(!det
-                .dangling
-                .iter()
+                .tagged_vec(Tag::DanglingRef)
+                .into_iter()
                 .any(|f| f.display_path.ends_with("good.link")));
 
             let _ = fs::remove_dir_all(&home);
@@ -1074,8 +1095,11 @@ mod tests {
             th,
         );
 
-        let unclear_names: Vec<String> =
-            det.unclear.iter().map(|f| f.display_path.clone()).collect();
+        let unclear_names: Vec<String> = det
+            .tagged_vec(Tag::Unclear)
+            .iter()
+            .map(|f| f.display_path.clone())
+            .collect();
         assert!(
             !unclear_names.iter().any(|p| p.contains("mcdata")),
             "已能确定性识别的目录不应留在「说不清」: {unclear_names:?}"
@@ -1110,8 +1134,8 @@ mod tests {
             th,
         );
         let f = det
-            .large
-            .iter()
+            .tagged_vec(Tag::Large)
+            .into_iter()
             .find(|f| f.display_path.contains("mcdata"))
             .expect("应在体积异常里");
         let id = f
@@ -1162,8 +1186,8 @@ mod tests {
             );
 
             let links: Vec<&str> = det
-                .dangling
-                .iter()
+                .tagged_vec(Tag::DanglingRef)
+                .into_iter()
                 .filter(|f| {
                     f.evidence
                         .iter()
@@ -1337,8 +1361,8 @@ mod tests {
             th,
         );
         let f = det
-            .large
-            .iter()
+            .tagged_vec(Tag::Large)
+            .into_iter()
             .find(|f| f.path.file_name().unwrap() == "target")
             .expect("target 应进体积异常");
         let gen = f
@@ -1373,7 +1397,88 @@ mod tests {
             &ReferenceIndex::default(),
             &cfg,
         );
-        assert!(det.unclear.is_empty(), "小目录不应进「说不清」");
+        assert!(
+            det.tagged_vec(Tag::Unclear).is_empty(),
+            "小目录不应进「说不清」"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn one_item_can_carry_multiple_tags() {
+        // tag 化的核心收益：同一条目可以同时「很大」且「说不出是什么」
+        let home = tmpdir("multitag");
+        let mystery = home.join("mystery");
+        fs::create_dir_all(&mystery).unwrap();
+        fs::write(mystery.join("blob.bin"), vec![0u8; 64]).unwrap();
+
+        let cfg = config_for(&home);
+        let scan = crate::scan::scan(&cfg);
+        let th = Thresholds {
+            large_bytes: 1,
+            ..Thresholds::default()
+        };
+        let det = detect_with(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+            th,
+        );
+
+        let item = det
+            .items
+            .iter()
+            .find(|f| f.display_path.contains("mystery"))
+            .expect("应有 mystery 条目");
+        assert!(item.tags.contains(&Tag::Large), "应带体积异常标签");
+        assert!(
+            item.tags.contains(&Tag::Unclear),
+            "认不出来时同时带「说不清」标签"
+        );
+        // 同一条目在两张视图里都出现，但底层只有一份
+        assert_eq!(
+            det.tagged_vec(Tag::Large)
+                .iter()
+                .filter(|f| f.display_path.contains("mystery"))
+                .count(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn items_are_sorted_by_bytes_regardless_of_tags() {
+        let home = tmpdir("tagorder");
+        fs::write(home.join("a.bin"), vec![0u8; 4096]).unwrap();
+        let small = home.join("small-dir");
+        fs::create_dir_all(&small).unwrap();
+        fs::write(small.join("x.bin"), vec![0u8; 64]).unwrap();
+        let big = home.join("big-dir");
+        fs::create_dir_all(&big).unwrap();
+        fs::write(big.join("y.bin"), vec![0u8; 65536]).unwrap();
+
+        let cfg = config_for(&home);
+        let scan = crate::scan::scan(&cfg);
+        let th = Thresholds {
+            large_bytes: 1,
+            ..Thresholds::default()
+        };
+        let det = detect_with(
+            &scan,
+            &ProcessIndex::default(),
+            &ReferenceIndex::default(),
+            &cfg,
+            th,
+        );
+
+        let sizes: Vec<u64> = det.items.iter().map(|f| f.bytes).collect();
+        assert!(
+            sizes.windows(2).all(|w| w[0] >= w[1]),
+            "items 必须按体积降序，标签不得影响排序: {sizes:?}"
+        );
+
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -1406,8 +1511,8 @@ mod tests {
         );
 
         let paths: Vec<&str> = det
-            .unclear
-            .iter()
+            .tagged_vec(Tag::Unclear)
+            .into_iter()
             .map(|u| u.display_path.as_str())
             .collect();
         assert!(
@@ -1419,16 +1524,29 @@ mod tests {
             "认不出来的大条目必须出现在「说不清」: {paths:?}"
         );
         // 排序：按体积降序
-        let sizes: Vec<u64> = det.unclear.iter().map(|u| u.bytes).collect();
+        let sizes: Vec<u64> = det
+            .tagged_vec(Tag::Unclear)
+            .iter()
+            .map(|u| u.bytes)
+            .collect();
         assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "应按体积降序");
 
         let one = det
-            .unclear
-            .iter()
+            .tagged_vec(Tag::Unclear)
+            .into_iter()
             .find(|u| u.display_path.contains("mystery-data"))
             .unwrap();
-        assert!(!one.hint.is_empty(), "必须给出「已掌握的线索」");
-        assert_eq!(one.kind.label(), "体积异常");
+        // 「线索」现在从证据里取（Identification 的 basis）
+        let hint = one
+            .evidence
+            .iter()
+            .find_map(|e| match e {
+                Evidence::Identification { basis, .. } => Some(basis.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(!hint.is_empty(), "必须给出「已掌握的线索」");
+        assert!(one.tags.contains(&Tag::Large), "应带体积异常标签");
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -1481,7 +1599,7 @@ mod tests {
             &ReferenceIndex::default(),
             &cfg,
         );
-        assert!(det.large.is_empty());
-        assert!(det.unclear.is_empty());
+        assert!(det.tagged_vec(Tag::Large).is_empty());
+        assert!(det.tagged_vec(Tag::Unclear).is_empty());
     }
 }
